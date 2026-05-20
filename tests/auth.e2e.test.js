@@ -28,15 +28,24 @@ describe('Auth E2E', () => {
     const registerRes = await request(app)
       .post('/api/auth/register')
       .send({
+        fullName: 'Test User',
         email: 'user@example.com',
         password: 'TestPass123!',
-        firstName: 'Test',
-        lastName: 'User',
+        confirmPassword: 'TestPass123!',
         role: 'client'
       });
 
     expect(registerRes.status).toBe(201);
-    expect(registerRes.body.data.accessToken).toBeTruthy();
+    expect(registerRes.body.data.requiresEmailVerification).toBe(true);
+
+    const token = registerRes.body.data.verificationToken;
+    expect(token).toBeTruthy();
+
+    const verifyPublicRes = await request(app)
+      .get(`/api/auth/verify-email/${token}`)
+      .send();
+
+    expect(verifyPublicRes.status).toBe(200);
 
     const loginRes = await request(app)
       .post('/api/auth/login')
@@ -47,6 +56,7 @@ describe('Auth E2E', () => {
 
     expect(loginRes.status).toBe(200);
     const accessToken = loginRes.body.data.accessToken;
+    expect(accessToken).toBeTruthy();
 
     const requestVerify = await request(app)
       .post('/api/auth/request-email-verification')
@@ -54,13 +64,6 @@ describe('Auth E2E', () => {
       .send();
 
     expect(requestVerify.status).toBe(200);
-    const token = requestVerify.body.data.token;
-
-    const verifyRes = await request(app)
-      .post('/api/auth/verify-email')
-      .set('Authorization', `Bearer ${accessToken}`)
-      .send({ token });
-
-    expect(verifyRes.status).toBe(200);
+    expect(requestVerify.body.message).toMatch(/already verified/i);
   });
 });

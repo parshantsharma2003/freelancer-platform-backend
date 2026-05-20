@@ -56,18 +56,19 @@ export const createContractFromProposal = async (proposal, job) => {
       currency: proposedBudgetCurrency || 'USD'
     },
     terms: job.description,
-    status: 'active', // Automatically active when created from accepted proposal
+    status: 'draft',
     startDate: new Date(),
     statusHistory: [
       {
-        status: 'active',
+        status: 'draft',
         changedAt: new Date(),
         changedBy: job.client
       }
     ],
     agreementSigned: {
       client: {
-        signed: false
+        signed: true,
+        signedAt: new Date()
       },
       freelancer: {
         signed: false
@@ -109,6 +110,10 @@ export const updateContractStatus = async (contract, newStatus, userId, role) =>
   // Only client can pause or cancel
   if ((newStatus === 'paused' || newStatus === 'cancelled') && !isClient) {
     throw new Error('Only the client can pause or cancel a contract');
+  }
+
+  if (contract.status === 'draft' && newStatus === 'active') {
+    throw new Error('Draft contracts must be accepted by the freelancer');
   }
 
   // Only system (payment controller) should complete contracts

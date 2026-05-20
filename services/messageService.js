@@ -8,19 +8,111 @@ const createHttpError = (message, statusCode) => {
   return error;
 };
 
+const getIdString = (value) => {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  if (value?._id) return value._id.toString();
+  if (typeof value.toString === 'function') return value.toString();
+  return null;
+};
+
+const normalizeAttachmentsForSchema = (attachments = []) => {
+  const list = Array.isArray(attachments) ? attachments : [];
+  const attachmentsPath = Message.schema.path('attachments');
+  const expectsStringArray = attachmentsPath?.caster?.instance === 'String';
+
+  if (expectsStringArray) {
+    return list
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object') {
+          return item.url || item.name || '';
+        }
+        return '';
+      })
+      .filter(Boolean);
+  }
+
+  return list
+    .map((item) => {
+      if (typeof item === 'string') {
+        return {
+          name: item.split('/').pop() || 'attachment',
+          url: item,
+          type: 'file',
+          uploadedAt: new Date()
+        };
+      }
+
+      if (item && typeof item === 'object') {
+        return {
+          name: item.name || item.url?.split('/').pop() || 'attachment',
+          url: item.url || '',
+          size: typeof item.size === 'number' ? item.size : undefined,
+          type: item.type || 'file',
+          uploadedAt: item.uploadedAt ? new Date(item.uploadedAt) : new Date()
+        };
+      }
+
+      return null;
+    })
+    .filter((item) => item && item.url);
+};
+
 const isParticipant = (contract, userId) => {
-  const uid = userId.toString();
+  const uid = getIdString(userId);
+  const clientId = getIdString(contract.client);
+  const freelancerId = getIdString(contract.freelancer);
   return (
-    contract.client.toString() === uid ||
-    contract.freelancer.toString() === uid
+    !!uid &&
+    (clientId === uid || freelancerId === uid)
   );
 };
 
 const resolveReceiverFromContract = (contract, senderId) => {
-  const sender = senderId.toString();
-  if (contract.client.toString() === sender) return contract.freelancer;
-  if (contract.freelancer.toString() === sender) return contract.client;
+  const sender = getIdString(senderId);
+  const clientId = getIdString(contract.client);
+  const freelancerId = getIdString(contract.freelancer);
+
+  if (!sender || !clientId || !freelancerId) return null;
+
+  if (clientId === sender) return contract.freelancer;
+  if (freelancerId === sender) return contract.client;
   return null;
+};
+
+const findOrCreateDirectConversation = async (senderId, receiverId, context = {}) => {
+  const participantQuery = {
+    participants: { $all: [senderId, receiverId] },
+    $or: [
+      { contract: { $exists: false } },
+      { contract: null }
+    ]
+  };
+
+  if (context.jobId) {
+    participantQuery.job = context.jobId;
+  }
+
+  if (context.proposalId) {
+    participantQuery.proposal = context.proposalId;
+  }
+
+  let conversation = await Conversation.findOne(participantQuery);
+
+  if (!conversation) {
+    conversation = await Conversation.create({
+      participants: [senderId, receiverId],
+      job: context.jobId || undefined,
+      proposal: context.proposalId || undefined,
+      unreadCount: {
+        [senderId.toString()]: 0,
+        [receiverId.toString()]: 0
+      }
+    });
+  }
+
+  return conversation;
 };
 
 const getAccessibleContract = async ({ contractId, senderId, receiverId, activeOnly = false }) => {
@@ -76,39 +168,83 @@ export const canMessage = async (senderId, receiverId) => {
     return { allowed: false, reason: 'Cannot message yourself' };
   }
 
+  // Check if an active contract exists between the two users
   const contract = await Contract.findOne({
     $or: [
-      { client: senderId, freelancer: receiverId },
-      { client: receiverId, freelancer: senderId }
-    ],
-    status: 'active'
+      { client: senderId, freelancer: receiverId, status: 'active' },
+      { client: receiverId, freelancer: senderId, status: 'active' }
+    ]
   }).select('_id status');
 
   if (!contract) {
-    return { allowed: false, reason: 'No active contract exists' };
+    return { 
+      allowed: false, 
+      reason: 'Messaging is only available after a contract has been successfully created between you' 
+    };
   }
 
   return { allowed: true, type: 'contract', contractId: contract._id };
 };
 
 export const sendMessage = async (senderId, receiverId, messageData) => {
-  const contract = await getAccessibleContract({
-    contractId: messageData.contractId,
-    senderId,
-    receiverId,
-    activeOnly: true
-  });
+  const hasContractContext = !!messageData.contractId;
+  let contract = null;
+  let conversation = null;
 
-  if (!isParticipant(contract, senderId) || !isParticipant(contract, receiverId)) {
-    throw createHttpError('Unauthorized: users must belong to the contract', 403);
+  if (hasContractContext) {
+    contract = await getAccessibleContract({
+      contractId: messageData.contractId,
+      senderId,
+      receiverId,
+      activeOnly: true
+    });
+
+    if (!isParticipant(contract, senderId) || !isParticipant(contract, receiverId)) {
+      throw createHttpError('Unauthorized: users must belong to the contract', 403);
+    }
+
+    conversation = await findOrCreateContractConversation(contract);
+  } else {
+    if (!receiverId) {
+      throw createHttpError('Receiver ID is required', 400);
+    }
+
+    // ENFORCE: Contract requirement - direct messaging only allowed if active contract exists
+    const activeContract = await Contract.findOne({
+      $or: [
+        { client: senderId, freelancer: receiverId, status: 'active' },
+        { client: receiverId, freelancer: senderId, status: 'active' }
+      ]
+    }).select('_id status client freelancer');
+
+    if (!activeContract) {
+      throw createHttpError(
+        'Messaging is only available after a contract has been successfully created between you',
+        403
+      );
+    }
+
+    // Use the contract-based conversation for direct messaging
+    contract = activeContract;
+    conversation = await findOrCreateContractConversation(contract);
+
+    if (!conversation) {
+      throw createHttpError('Conversation not found', 404);
+    }
+
+    const participantIds = (conversation.participants || []).map((participant) => getIdString(participant));
+    if (!participantIds.includes(getIdString(senderId)) || !participantIds.includes(getIdString(receiverId))) {
+      throw createHttpError('Unauthorized: users must belong to this conversation', 403);
+    }
   }
 
   const senderUser = await User.findById(senderId).select('role');
-  const conversation = await findOrCreateContractConversation(contract);
 
-  const safeMessageType = ['text', 'file'].includes(messageData.messageType)
+  const safeMessageType = ['text', 'file', 'voice', 'image'].includes(messageData.messageType)
     ? messageData.messageType
     : 'text';
+
+  const normalizedAttachments = normalizeAttachmentsForSchema(messageData.attachments);
 
   const message = await Message.create({
     conversation: conversation._id,
@@ -117,8 +253,9 @@ export const sendMessage = async (senderId, receiverId, messageData) => {
     content: messageData.content,
     messageType: safeMessageType,
     senderRole: senderUser?.role || 'client',
-    attachments: messageData.attachments || [],
-    contract: contract._id
+    attachments: normalizedAttachments,
+    contract: contract?._id,
+    proposal: messageData.proposalId || undefined
   });
 
   conversation.lastMessage = message._id;
@@ -149,9 +286,23 @@ export const sendContractMessage = async (contractId, senderId, messageData) => 
     throw createHttpError('Forbidden: Not authorized for this contract chat', 403);
   }
 
-  const resolvedReceiver = resolveReceiverFromContract(contract, senderId);
+  let resolvedReceiver = resolveReceiverFromContract(contract, senderId);
+
+  // Fallback for legacy conversations where contract participants may be stale/populated unexpectedly.
   if (!resolvedReceiver) {
-    throw createHttpError('Invalid contract participants', 400);
+    const conversation = await Conversation.findOne({ contract: contract._id }).select('participants');
+    const sender = getIdString(senderId);
+    const fallbackReceiverId = conversation?.participants
+      ?.map((participantId) => getIdString(participantId))
+      ?.find((participantId) => participantId && participantId !== sender);
+
+    if (fallbackReceiverId) {
+      resolvedReceiver = fallbackReceiverId;
+    }
+  }
+
+  if (!resolvedReceiver) {
+    throw createHttpError('Contract participant mapping is invalid for this chat', 403);
   }
 
   return sendMessage(senderId, resolvedReceiver, {
@@ -162,8 +313,8 @@ export const sendContractMessage = async (contractId, senderId, messageData) => 
 
 export const getUserConversations = async (userId, userRole = 'client') => {
   const query = userRole === 'super_admin'
-    ? { contract: { $ne: null } }
-    : { participants: userId, contract: { $ne: null } };
+    ? {}
+    : { participants: userId };
 
   const conversations = await Conversation.find(query)
     .populate('participants', 'firstName lastName avatar role')
@@ -245,7 +396,7 @@ export const getConversationMessages = async (conversationId, userId, page = 1, 
   const conversation = await Conversation.findById(conversationId)
     .populate('contract', 'status client freelancer');
 
-  if (!conversation || !conversation.contract) {
+  if (!conversation) {
     throw createHttpError('Conversation not found', 404);
   }
 
@@ -325,7 +476,7 @@ export const markConversationAsRead = async (conversationId, userId, userRole = 
   const conversation = await Conversation.findById(conversationId)
     .populate('contract', 'status client freelancer');
 
-  if (!conversation || !conversation.contract) {
+  if (!conversation) {
     throw createHttpError('Conversation not found', 404);
   }
 
@@ -428,8 +579,7 @@ export const getUnreadCount = async (userId) => {
 
 export const getUnreadByConversation = async (userId) => {
   const conversations = await Conversation.find({
-    participants: userId,
-    contract: { $ne: null }
+    participants: userId
   });
 
   const unreadByConversation = {};
@@ -453,10 +603,10 @@ export const searchMessages = async (userId, query, conversationId = null, userR
   let allowedConversationIds = [];
 
   if (userRole === 'super_admin') {
-    const allConversations = await Conversation.find({ contract: { $ne: null } }).select('_id');
+    const allConversations = await Conversation.find({}).select('_id');
     allowedConversationIds = allConversations.map((conversation) => conversation._id);
   } else {
-    const userConversations = await Conversation.find({ participants: userId, contract: { $ne: null } }).select('_id');
+    const userConversations = await Conversation.find({ participants: userId }).select('_id');
     allowedConversationIds = userConversations.map((conversation) => conversation._id);
   }
 
@@ -496,19 +646,12 @@ export const getAttachmentMetadata = async (messageId, attachmentIndex) => {
 };
 
 export const getDirectMessages = async (userId, otherUserId, page = 1, limit = 50) => {
-  const contract = await getAccessibleContract({
-    senderId: userId,
-    receiverId: otherUserId
-  });
+  const conversation = await findOrCreateDirectConversation(userId, otherUserId);
 
   const skip = (page - 1) * limit;
 
   const messages = await Message.find({
-    contract: contract._id,
-    $or: [
-      { sender: userId, receiver: otherUserId },
-      { sender: otherUserId, receiver: userId }
-    ]
+    conversation: conversation._id
   })
     .populate('sender', 'firstName lastName avatar')
     .populate('receiver', 'firstName lastName avatar')
@@ -516,15 +659,10 @@ export const getDirectMessages = async (userId, otherUserId, page = 1, limit = 5
     .skip(skip)
     .limit(limit);
 
-  const total = await Message.countDocuments({
-    contract: contract._id,
-    $or: [
-      { sender: userId, receiver: otherUserId },
-      { sender: otherUserId, receiver: userId }
-    ]
-  });
+  const total = await Message.countDocuments({ conversation: conversation._id });
 
   return {
+    conversation,
     messages,
     pagination: {
       page,

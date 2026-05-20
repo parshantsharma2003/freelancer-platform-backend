@@ -17,9 +17,14 @@ export const socketAuthMiddleware = async (socket, next) => {
     try {
       // Verify token
       const decoded = verifyAccessToken(token);
+      const userId = decoded.sub || decoded.userId;
+
+      if (!userId) {
+        return next(new Error('Authentication error: Token missing subject claim'));
+      }
 
       // Get user from database
-      const user = await User.findById(decoded.userId).select('_id role email firstName');
+      const user = await User.findById(userId).select('_id role email firstName');
 
       if (!user) {
         return next(new Error('Authentication error: User not found'));

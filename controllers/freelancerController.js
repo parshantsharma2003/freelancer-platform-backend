@@ -1,6 +1,7 @@
 import FreelancerProfile from '../models/FreelancerProfile.js';
 import User from '../models/User.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { rankFreelancers } from "../services/rankingService.js";
 
 // @desc    Create/Update freelancer profile
 // @route   POST /api/freelancers/profile
@@ -17,12 +18,12 @@ export const createOrUpdateProfile = asyncHandler(async (req, res) => {
       profileData,
       { new: true, runValidators: true }
     );
-    profile.calculateCompleteness();
+    profile.calculateCompleteness({ hasAvatar: !!req.user?.avatar });
     await profile.save();
   } else {
     // Create new profile
     profile = await FreelancerProfile.create(profileData);
-    profile.calculateCompleteness();
+    profile.calculateCompleteness({ hasAvatar: !!req.user?.avatar });
     await profile.save();
   }
 
@@ -37,13 +38,24 @@ export const createOrUpdateProfile = asyncHandler(async (req, res) => {
 // @route   GET /api/freelancers/profile
 // @access  Private
 export const getMyProfile = asyncHandler(async (req, res) => {
-  const profile = await FreelancerProfile.findOne({ user: req.user._id }).populate('user', 'firstName lastName email avatar');
+  let profile = await FreelancerProfile.findOne({ user: req.user._id }).populate('user', 'firstName lastName email avatar');
 
   if (!profile) {
-    return res.status(404).json({
-      status: 'error',
-      message: 'Profile not found'
+    profile = await FreelancerProfile.create({
+      user: req.user._id,
+      title: 'Freelancer profile',
+      description: 'Complete your profile to start getting hired.',
+      hourlyRate: 0,
+      visibility: 'private'
     });
+
+    profile = await FreelancerProfile.findById(profile._id).populate('user', 'firstName lastName email avatar');
+  }
+
+  const existingScore = profile.profileCompleteness;
+  const nextScore = profile.calculateCompleteness({ hasAvatar: !!profile?.user?.avatar });
+  if (existingScore !== nextScore) {
+    await profile.save();
   }
 
   res.status(200).json({
@@ -104,16 +116,18 @@ export const getFreelancers = asyncHandler(async (req, res) => {
 
   const freelancers = await FreelancerProfile.find(query)
     .populate('user', 'firstName lastName avatar')
-    .sort({ rating: -1, totalJobs: -1 })
     .skip(skip)
     .limit(parseInt(limit));
+
+  // Rank freelancers by performance using ranking logic
+  const rankedFreelancers = rankFreelancers(freelancers);
 
   const total = await FreelancerProfile.countDocuments(query);
 
   res.status(200).json({
     status: 'success',
     data: {
-      freelancers,
+      freelancers: rankedFreelancers,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -154,12 +168,14 @@ export const getFeaturedFreelancers = asyncHandler(async (req, res) => {
     visibility: 'public'
   })
     .populate('user', 'firstName lastName avatar')
-    .sort({ rating: -1 })
     .limit(10);
+
+  // Apply ranking logic
+  const ranked = rankFreelancers(freelancers);
 
   res.status(200).json({
     status: 'success',
-    data: { freelancers }
+    data: { freelancers: ranked }
   });
 });
 
@@ -172,11 +188,13 @@ export const getTopRatedFreelancers = asyncHandler(async (req, res) => {
     rating: { $gte: 4.5 }
   })
     .populate('user', 'firstName lastName avatar')
-    .sort({ rating: -1, totalJobs: -1 })
     .limit(20);
+
+  // Apply ranking logic
+  const ranked = rankFreelancers(freelancers);
 
   res.status(200).json({
     status: 'success',
-    data: { freelancers }
+    data: { freelancers: ranked }
   });
 });

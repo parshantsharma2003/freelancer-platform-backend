@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import User from '../models/User.js';
 import Job from '../models/Job.js';
 import Proposal from '../models/Proposal.js';
@@ -10,8 +11,13 @@ import Review from '../models/Review.js';
 import Notification from '../models/Notification.js';
 import AuditLog from '../models/AuditLog.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { generateAccessToken, generateRefreshToken } from '../utils/jwtUtils.js';
+import {
+  generateAccessToken,
+  generateRefreshToken,
+  hashToken
+} from '../utils/jwtUtils.js';
 import { logAuditEvent } from '../utils/auditLogger.js';
+import { getAuthCookieOptions } from '../utils/cookieOptions.js';
 
 // =====================================================
 // SUPER ADMIN AUTHENTICATION
@@ -88,8 +94,15 @@ export const adminLogin = asyncHandler(async (req, res) => {
   user.lastLogin = new Date();
   user.lastLoginIp = req.ip || req.connection.remoteAddress;
   user.lastLoginUserAgent = req.get('user-agent');
-  user.refreshToken = refreshToken;
+  user.refreshToken = hashToken(refreshToken);
   await user.save();
+
+  res.cookie('accessToken', accessToken, getAuthCookieOptions(15 * 60 * 1000));
+  res.cookie(
+    'refreshToken',
+    refreshToken,
+    getAuthCookieOptions(7 * 24 * 60 * 60 * 1000)
+  );
 
   // Log successful admin login
   await logAuditEvent({
@@ -283,6 +296,97 @@ export const getAllUsers = asyncHandler(async (req, res) => {
         total,
         pages: Math.ceil(total / limit)
       }
+    }
+  });
+});
+
+// @desc    Create user (admin)
+// @route   POST /api/admin/users
+// @access  Private (Super Admin only)
+export const createUser = asyncHandler(async (req, res) => {
+  const {
+    email,
+    firstName,
+    lastName,
+    role = 'client',
+    password,
+    accountStatus = 'active'
+  } = req.body;
+
+  if (!email || !firstName || !lastName) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Email, firstName, and lastName are required'
+    });
+  }
+
+  if (!['client', 'freelancer'].includes(role)) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Role must be client or freelancer'
+    });
+  }
+
+  const existingUser = await User.findOne({ email });
+
+  if (existingUser) {
+    return res.status(409).json({
+      status: 'error',
+      message: 'A user with this email already exists'
+    });
+  }
+
+  const generatedPassword =
+    password || crypto.randomBytes(10).toString('hex');
+
+  const user = await User.create({
+    email,
+    firstName,
+    lastName,
+    role,
+    password: generatedPassword,
+    accountStatus,
+    isActive: true
+  });
+
+  if (role === 'client') {
+    await ClientProfile.findOneAndUpdate(
+      { user: user._id },
+      { $setOnInsert: { user: user._id } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+  }
+
+  if (role === 'freelancer') {
+    await FreelancerProfile.findOneAndUpdate(
+      { user: user._id },
+      { $setOnInsert: { user: user._id } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+  }
+
+  await logAuditEvent({
+    actor: req.user._id,
+    actorRole: req.user.role,
+    action: 'USER_CREATED_BY_ADMIN',
+    targetType: 'User',
+    targetId: user._id,
+    summary: `Admin created user ${user.email}`,
+    metadata: new Map([
+      ['role', role],
+      ['accountStatus', accountStatus],
+      ['generatedPassword', password ? 'false' : 'true']
+    ]),
+    ipAddress: req.ip || req.connection.remoteAddress,
+    userAgent: req.get('user-agent')
+  });
+
+  res.status(201).json({
+    status: 'success',
+    message: 'User created successfully',
+    data: {
+      user,
+      ...(password ? {} : { generatedPassword })
     }
   });
 });
@@ -568,6 +672,96 @@ export const getAllJobs = asyncHandler(async (req, res) => {
   });
 });
 
+// @desc    Create job (admin)
+// @route   POST /api/admin/jobs
+// @access  Private (Super Admin only)
+export const createAdminJob = asyncHandler(async (req, res) => {
+  const {
+    clientId,
+    title,
+    description,
+    category,
+    budget,
+    status = 'open',
+    duration = '1-2-weeks',
+    experienceLevel = 'intermediate'
+  } = req.body;
+
+  if (!title || !description || !category) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'title, description, and category are required'
+    });
+  }
+
+  let client = null;
+
+  if (clientId) {
+    client = await User.findOne({ _id: clientId, role: 'client' });
+  }
+
+  if (!client) {
+    client = await User.findOne({ role: 'client', isActive: true });
+  }
+
+  if (!client) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'No active client found. Pass a valid clientId.'
+    });
+  }
+
+  const parsedBudget = Number(budget);
+
+  const job = await Job.create({
+    client: client._id,
+    title,
+    description,
+    category,
+    budget: {
+      type: 'fixed',
+      amount: Number.isFinite(parsedBudget) ? parsedBudget : 0,
+      currency: 'USD'
+    },
+    duration,
+    experienceLevel,
+    status
+  });
+
+  await ClientProfile.findOneAndUpdate(
+    { user: client._id },
+    {
+      $setOnInsert: { user: client._id },
+      $inc: {
+        totalJobs: 1,
+        activeJobs: status === 'open' ? 1 : 0
+      }
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
+  await logAuditEvent({
+    actor: req.user._id,
+    actorRole: req.user.role,
+    action: 'JOB_CREATED_BY_ADMIN',
+    targetType: 'Job',
+    targetId: job._id,
+    summary: `Admin created job ${job.title}`,
+    metadata: new Map([
+      ['clientId', String(client._id)],
+      ['status', status]
+    ]),
+    ipAddress: req.ip || req.connection.remoteAddress,
+    userAgent: req.get('user-agent')
+  });
+
+  res.status(201).json({
+    status: 'success',
+    message: 'Job created successfully',
+    data: { job }
+  });
+});
+
 // @desc    Get job by ID
 // @route   GET /api/admin/jobs/:id
 // @access  Private (Admin only)
@@ -655,7 +849,11 @@ export const deleteAdminJob = asyncHandler(async (req, res) => {
 // @route   PUT /api/admin/jobs/:id/flag
 // @access  Private (Admin only)
 export const flagJob = asyncHandler(async (req, res) => {
-  const { isFlagged, reason } = req.body;
+  const isBodyString = typeof req.body === 'string';
+  const isFlagged = isBodyString
+    ? true
+    : req.body?.isFlagged ?? true;
+  const reason = isBodyString ? req.body : req.body?.reason;
 
   const job = await Job.findById(req.params.id);
 
@@ -696,12 +894,13 @@ export const toggleFeatured = asyncHandler(async (req, res) => {
     });
   }
 
-  profile.isFeatured = isFeatured;
+  profile.isFeatured =
+    typeof isFeatured === 'boolean' ? isFeatured : !profile.isFeatured;
   await profile.save();
 
   res.status(200).json({
     status: 'success',
-    message: `Freelancer ${isFeatured ? 'featured' : 'unfeatured'}`,
+    message: `Freelancer ${profile.isFeatured ? 'featured' : 'unfeatured'}`,
     data: { profile }
   });
 });
@@ -871,6 +1070,60 @@ export const getAllProposals = asyncHandler(async (req, res) => {
 });
 
 /**
+ * @desc    Update proposal (admin override)
+ * @route   PUT /api/admin/proposals/:id
+ * @access  Private (Super Admin only)
+ */
+export const updateProposal = asyncHandler(async (req, res) => {
+  const proposal = await Proposal.findById(req.params.id);
+
+  if (!proposal) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Proposal not found'
+    });
+  }
+
+  const { status, coverLetter, proposedBudget, deliveryTime } = req.body;
+
+  if (status !== undefined) proposal.status = status;
+  if (coverLetter !== undefined) proposal.coverLetter = coverLetter;
+
+  if (proposedBudget && typeof proposedBudget === 'object') {
+    proposal.proposedBudget = {
+      ...proposal.proposedBudget,
+      ...proposedBudget
+    };
+  }
+
+  if (deliveryTime && typeof deliveryTime === 'object') {
+    proposal.deliveryTime = {
+      ...proposal.deliveryTime,
+      ...deliveryTime
+    };
+  }
+
+  await proposal.save();
+
+  await logAuditEvent({
+    actor: req.user._id,
+    actorRole: req.user.role,
+    action: 'PROPOSAL_UPDATED_BY_ADMIN',
+    targetType: 'Proposal',
+    targetId: proposal._id,
+    summary: 'Admin updated proposal',
+    ipAddress: req.ip || req.connection.remoteAddress,
+    userAgent: req.get('user-agent')
+  });
+
+  res.status(200).json({
+    status: 'success',
+    message: 'Proposal updated successfully',
+    data: { proposal }
+  });
+});
+
+/**
  * @desc    Delete proposal (admin override)
  * @route   DELETE /api/admin/proposals/:id
  * @access  Private (Super Admin only)
@@ -955,6 +1208,63 @@ export const getAllContracts = asyncHandler(async (req, res) => {
         pages: Math.ceil(total / parseInt(limit))
       }
     }
+  });
+});
+
+/**
+ * @desc    Update contract (admin override)
+ * @route   PUT /api/admin/contracts/:id
+ * @access  Private (Super Admin only)
+ */
+export const updateContract = asyncHandler(async (req, res) => {
+  const contract = await Contract.findById(req.params.id);
+
+  if (!contract) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Contract not found'
+    });
+  }
+
+  const {
+    title,
+    description,
+    terms,
+    endDate,
+    status,
+    budget
+  } = req.body;
+
+  if (title !== undefined) contract.title = title;
+  if (description !== undefined) contract.description = description;
+  if (terms !== undefined) contract.terms = terms;
+  if (endDate !== undefined) contract.endDate = endDate;
+  if (status !== undefined) contract.status = status;
+
+  if (budget && typeof budget === 'object') {
+    contract.budget = {
+      ...contract.budget,
+      ...budget
+    };
+  }
+
+  await contract.save();
+
+  await logAuditEvent({
+    actor: req.user._id,
+    actorRole: req.user.role,
+    action: 'CONTRACT_UPDATED_BY_ADMIN',
+    targetType: 'Contract',
+    targetId: contract._id,
+    summary: 'Admin updated contract',
+    ipAddress: req.ip || req.connection.remoteAddress,
+    userAgent: req.get('user-agent')
+  });
+
+  res.status(200).json({
+    status: 'success',
+    message: 'Contract updated successfully',
+    data: { contract }
   });
 });
 
@@ -1317,7 +1627,7 @@ export const getPlatformSettings = asyncHandler(async (req, res) => {
 });
 
 // =====================================================
-// NOTIFICATION BROADCASTING
+// NOTIFICATION BROADCASTING (FIXED)
 // =====================================================
 
 /**
@@ -1326,36 +1636,55 @@ export const getPlatformSettings = asyncHandler(async (req, res) => {
  * @access  Private (Super Admin only)
  */
 export const broadcastNotification = asyncHandler(async (req, res) => {
-  const { title, message, type, targetRole } = req.body;
 
-  // Build recipient filter
+  const { title, message, targetRole } = req.body;
+
+  // Validate input
+  if (!title || !message) {
+    return res.status(400).json({
+      status: "error",
+      message: "Title and message are required"
+    });
+  }
+
+  // Build filter for target users
   const userFilter = {};
-  if (targetRole && targetRole !== 'all') {
+
+  if (targetRole && targetRole !== "all") {
     userFilter.role = targetRole;
   }
 
-  // Get all users matching filter
-  const users = await User.find(userFilter).select('_id');
+  // Fetch users
+  const users = await User.find(userFilter).select("_id");
 
-  // Create notifications for all users
-  const notifications = users.map(user => ({
-    user: user._id,
-    type: type || 'system',
+  if (!users.length) {
+    return res.status(404).json({
+      status: "error",
+      message: "No users found to receive notification"
+    });
+  }
+
+  // Create notification objects
+  const notifications = users.map((user) => ({
+    recipient: user._id,
+    type: "system_announcement",
     title,
     message,
-    priority: 'high',
+    priority: "high",
     isRead: false
   }));
 
+  // Insert all notifications
   await Notification.insertMany(notifications);
 
-  // Broadcast via Socket.io if available
-  const socketBroadcast = req.app.get('socketBroadcast');
+  // Socket broadcast (if enabled)
+  const socketBroadcast = req.app.get("socketBroadcast");
+
   if (socketBroadcast && socketBroadcast.broadcastSystemNotification) {
     socketBroadcast.broadcastSystemNotification({
       title,
       message,
-      type
+      type: "system_announcement"
     });
   }
 
@@ -1363,25 +1692,26 @@ export const broadcastNotification = asyncHandler(async (req, res) => {
   await logAuditEvent({
     actor: req.user._id,
     actorRole: req.user.role,
-    action: 'BROADCAST_NOTIFICATION',
-    targetType: 'System',
+    action: "BROADCAST_NOTIFICATION",
+    targetType: "System",
     summary: `Admin broadcasted notification to ${users.length} users`,
     metadata: new Map([
-      ['title', title],
-      ['recipientCount', users.length.toString()],
-      ['targetRole', targetRole || 'all']
+      ["title", title],
+      ["recipientCount", users.length.toString()],
+      ["targetRole", targetRole || "all"]
     ]),
     ipAddress: req.ip || req.connection.remoteAddress,
-    userAgent: req.get('user-agent')
+    userAgent: req.get("user-agent")
   });
 
   res.status(200).json({
-    status: 'success',
+    status: "success",
     message: `Notification sent to ${users.length} users`,
     data: {
       recipientCount: users.length
     }
   });
+
 });
 
 // =====================================================

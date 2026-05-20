@@ -18,10 +18,15 @@ export const saveJob = asyncHandler(async (req, res) => {
   }
 
   // Check if already saved
-  if (req.user.savedJobs && req.user.savedJobs.includes(jobId)) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'Job already saved'
+  const isAlreadySaved = (req.user.savedJobs || []).some(
+    (id) => id.toString() === jobId
+  );
+
+  if (isAlreadySaved) {
+    return res.status(200).json({
+      status: 'success',
+      message: 'Job already saved',
+      data: { jobId }
     });
   }
 
@@ -44,10 +49,15 @@ export const unsaveJob = asyncHandler(async (req, res) => {
   const { jobId } = req.params;
 
   // Remove from saved jobs
-  if (!req.user.savedJobs || !req.user.savedJobs.includes(jobId)) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'Job not in saved list'
+  const isSaved = (req.user.savedJobs || []).some(
+    (id) => id.toString() === jobId
+  );
+
+  if (!isSaved) {
+    return res.status(200).json({
+      status: 'success',
+      message: 'Job removed from saved list',
+      data: { jobId }
     });
   }
 
@@ -77,7 +87,11 @@ export const getSavedJobs = asyncHandler(async (req, res) => {
     });
   }
 
-  const query = { _id: { $in: req.user.savedJobs }, status: 'open' };
+  const query = { _id: { $in: req.user.savedJobs } };
+
+  if (req.query.status) {
+    query.status = req.query.status;
+  }
 
   if (search) {
     query.$or = [
@@ -118,7 +132,9 @@ export const getSavedJobs = asyncHandler(async (req, res) => {
 export const checkJobSaved = asyncHandler(async (req, res) => {
   const { jobId } = req.params;
 
-  const isSaved = req.user.savedJobs && req.user.savedJobs.includes(jobId);
+  const isSaved = (req.user.savedJobs || []).some(
+    (id) => id.toString() === jobId
+  );
 
   res.status(200).json({
     status: 'success',

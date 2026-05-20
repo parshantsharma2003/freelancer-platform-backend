@@ -23,6 +23,9 @@ export const createOrUpdateProfile = asyncHandler(async (req, res) => {
     profile = await ClientProfile.create(profileData);
   }
 
+  profile.calculateCompleteness({ hasAvatar: !!req.user?.avatar });
+  await profile.save();
+
   res.status(200).json({
     status: 'success',
     message: 'Profile saved successfully',
@@ -34,13 +37,17 @@ export const createOrUpdateProfile = asyncHandler(async (req, res) => {
 // @route   GET /api/clients/profile
 // @access  Private
 export const getMyProfile = asyncHandler(async (req, res) => {
-  const profile = await ClientProfile.findOne({ user: req.user._id }).populate('user', 'firstName lastName email avatar');
+  let profile = await ClientProfile.findOne({ user: req.user._id }).populate('user', 'firstName lastName email avatar');
 
   if (!profile) {
-    return res.status(404).json({
-      status: 'error',
-      message: 'Profile not found'
-    });
+    profile = await ClientProfile.create({ user: req.user._id });
+    profile = await ClientProfile.findById(profile._id).populate('user', 'firstName lastName email avatar');
+  }
+
+  const existingScore = profile.profileCompleteness;
+  const nextScore = profile.calculateCompleteness({ hasAvatar: !!profile?.user?.avatar });
+  if (existingScore !== nextScore) {
+    await profile.save();
   }
 
   res.status(200).json({
@@ -62,6 +69,8 @@ export const getClientById = asyncHandler(async (req, res) => {
       message: 'Client not found'
     });
   }
+
+  profile.calculateCompleteness({ hasAvatar: !!profile?.user?.avatar });
 
   res.status(200).json({
     status: 'success',

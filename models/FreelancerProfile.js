@@ -161,35 +161,52 @@ const freelancerProfileSchema = new mongoose.Schema({
     default: Date.now
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
 });
 
 // Calculate profile completeness
-freelancerProfileSchema.methods.calculateCompleteness = function() {
+freelancerProfileSchema.methods.calculateCompleteness = function(options = {}) {
+  const { hasAvatar = false } = options;
   let score = 0;
   const fields = {
-    title: 10,
-    description: 15,
-    hourlyRate: 10,
-    skills: 15,
-    portfolio: 20,
-    experience: 15,
+    avatar: 10,
+    title: 5,
+    description: 20,
+    hourlyRate: 5,
     education: 10,
-    languages: 5
+    skills: 20,
+    portfolio: 20,
+    portfolioBonus: 10
   };
 
+  if (hasAvatar) score += fields.avatar;
   if (this.title) score += fields.title;
-  if (this.description && this.description.length > 100) score += fields.description;
+  if (this.description && this.description.length >= 50) score += fields.description;
   if (this.hourlyRate > 0) score += fields.hourlyRate;
-  if (this.skills && this.skills.length >= 3) score += fields.skills;
-  if (this.portfolio && this.portfolio.length > 0) score += fields.portfolio;
-  if (this.experience && this.experience.length > 0) score += fields.experience;
+  if (this.skills && this.skills.length > 0) score += fields.skills;
   if (this.education && this.education.length > 0) score += fields.education;
-  if (this.languages && this.languages.length > 0) score += fields.languages;
+  if (this.portfolio && this.portfolio.length > 0) {
+    score += fields.portfolio;
+    score += fields.portfolioBonus;
+  }
 
-  this.profileCompleteness = score;
-  return score;
+  this.profileCompleteness = Math.min(score, 100);
+  return this.profileCompleteness;
 };
+
+freelancerProfileSchema.virtual('bio').get(function() {
+  return this.description;
+}).set(function(value) {
+  this.description = value;
+});
+
+freelancerProfileSchema.virtual('completeness').get(function() {
+  return this.profileCompleteness;
+}).set(function(value) {
+  this.profileCompleteness = value;
+});
 
 // Index for search - separate indexes for array fields (MongoDB doesn't support compound indexes with multiple arrays)
 freelancerProfileSchema.index({ skills: 1 });

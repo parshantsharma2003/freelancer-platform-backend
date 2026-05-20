@@ -14,7 +14,7 @@ import {
   checkJobSaved
 } from '../controllers/savedJobController.js';
 import { protect, freelancerOnly } from '../middleware/authMiddleware.js';
-import { objectIdValidation, paginationValidation } from '../middleware/validationMiddleware.js';
+import { jobIdValidation, objectIdValidation, paginationValidation } from '../middleware/validationMiddleware.js';
 
 const router = express.Router();
 
@@ -24,9 +24,9 @@ router.get('/me/profile', protect, freelancerOnly, getMyProfile);
 
 // Saved Jobs routes
 router.get('/saved-jobs', protect, freelancerOnly, paginationValidation, getSavedJobs);
-router.post('/saved-jobs/:jobId', protect, freelancerOnly, objectIdValidation, saveJob);
-router.delete('/saved-jobs/:jobId', protect, freelancerOnly, objectIdValidation, unsaveJob);
-router.get('/saved-jobs/:jobId/check', protect, freelancerOnly, objectIdValidation, checkJobSaved);
+router.post('/saved-jobs/:jobId', protect, freelancerOnly, jobIdValidation, saveJob);
+router.delete('/saved-jobs/:jobId', protect, freelancerOnly, jobIdValidation, unsaveJob);
+router.get('/saved-jobs/:jobId/check', protect, freelancerOnly, jobIdValidation, checkJobSaved);
 
 // Public specific routes - MUST come before generic routes
 router.get('/featured', getFeaturedFreelancers);

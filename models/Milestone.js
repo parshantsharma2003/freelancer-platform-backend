@@ -21,10 +21,27 @@ const milestoneSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  orderIndex: {
+    type: Number,
+    default: 0,
+    min: 0,
+    index: true
+  },
   // 📊 Status lifecycle
   status: {
     type: String,
-    enum: ['pending', 'submitted', 'approved', 'paid', 'rejected'],
+    enum: [
+      'pending',
+      'funded',
+      'in_progress',
+      'submitted',
+      'approved',
+      'changes_requested',
+      'paid',
+      'refunded',
+      'disputed',
+      'rejected'
+    ],
     default: 'pending',
     index: true
   },
@@ -40,8 +57,9 @@ const milestoneSchema = new mongoose.Schema({
     },
     heldAt: Date,
     releasedAt: Date,
+    refundedAt: Date,
     releaseReason: String,
-    // Prevent double payment
+    stripePaymentIntentId: String,
     paymentReleased: {
       type: Boolean,
       default: false
@@ -63,6 +81,39 @@ const milestoneSchema = new mongoose.Schema({
     }],
     submissionNotes: String
   },
+  // 📎 Planning attachments
+  attachments: [{
+    name: String,
+    url: String,
+    type: String,
+    size: Number,
+    uploadedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    },
+    uploadedAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
+  // 💬 Milestone comments
+  comments: [{
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true
+    },
+    content: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 2000
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
   // ✅ Approval
   approval: {
     approvedAt: Date,
@@ -125,6 +176,7 @@ const milestoneSchema = new mongoose.Schema({
 // Index for efficient queries
 milestoneSchema.index({ contract: 1, status: 1 });
 milestoneSchema.index({ 'escrow.paymentReleased': 1 });
+milestoneSchema.index({ contract: 1, orderIndex: 1, createdAt: 1 });
 
 // Virtual for order in contract milestones
 milestoneSchema.virtual('order').get(function() {

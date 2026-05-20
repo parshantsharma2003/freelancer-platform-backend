@@ -35,7 +35,10 @@ export const sendMessage = asyncHandler(async (req, res) => {
   res.status(201).json({
     status: 'success',
     message: 'Message sent successfully',
-    data: { message: result.message }
+    data: {
+      message: result.message,
+      conversation: result.conversation
+    }
   });
 });
 
@@ -119,6 +122,21 @@ export const markAsRead = asyncHandler(async (req, res) => {
 export const deleteMessage = asyncHandler(async (req, res) => {
   const message = await messageService.deleteMessage(req.params.id, req.user._id);
 
+  // 📡 BROADCAST MESSAGE DELETION VIA SOCKET
+  try {
+    const socketBroadcast = req.app.get('socketBroadcast');
+    if (socketBroadcast && message) {
+      socketBroadcast.broadcastMessageDeleted(
+        message.contract?._id,
+        message.conversation?._id,
+        message._id,
+        req.user._id
+      );
+    }
+  } catch (socketError) {
+    console.log('[Socket] Message deletion broadcast failed:', socketError.message);
+  }
+
   res.status(200).json({
     status: 'success',
     message: 'Message deleted successfully'
@@ -198,6 +216,8 @@ export const getDirectMessages = asyncHandler(async (req, res) => {
     parseInt(limit)
   );
 
+  await messageService.markConversationAsRead(result.conversation._id, req.user._id, req.user.role);
+
   res.status(200).json({
     status: 'success',
     data: result
@@ -252,15 +272,18 @@ export const sendContractMessage = asyncHandler(async (req, res) => {
   const { contractId } = req.params;
   const { content, messageType, attachments } = req.body;
 
-  if (!content) {
+  const hasTextContent = typeof content === 'string' && content.trim().length > 0;
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+
+  if (!hasTextContent && !hasAttachments) {
     return res.status(400).json({
       status: 'error',
-      message: 'Message content is required'
+      message: 'Message content or attachments are required'
     });
   }
 
   const result = await messageService.sendContractMessage(contractId, req.user._id, {
-    content,
+    content: hasTextContent ? content.trim() : `Shared ${messageType || 'file'}`,
     messageType,
     attachments
   });

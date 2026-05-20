@@ -2,6 +2,7 @@ import express from 'express';
 import {
   createPayment,
   releasePayment,
+  refundPayment,
   getMyPayments,
   getPaymentById,
   getPaymentStats,
@@ -19,6 +20,7 @@ const router = express.Router();
 // Protected routes
 router.post('/', protect, createPayment);
 router.post('/:id/release', protect, objectIdValidation, releasePayment);
+router.post('/:id/refund', protect, objectIdValidation, refundPayment);
 router.get('/my', protect, paginationValidation, getMyPayments);
 router.get('/stats/summary', protect, getPaymentStats);
 router.get('/stats/earnings', protect, getEarningsByMonth);

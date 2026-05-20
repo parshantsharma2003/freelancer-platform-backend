@@ -17,8 +17,10 @@ const paymentSchema = new mongoose.Schema({
     required: true
   },
   milestone: {
-    type: mongoose.Schema.Types.ObjectId
-  },
+  type: mongoose.Schema.Types.ObjectId,
+  ref: 'Milestone',
+  required: true
+},
   amount: {
     type: Number,
     required: true,
@@ -27,6 +29,11 @@ const paymentSchema = new mongoose.Schema({
   currency: {
     type: String,
     default: 'USD'
+  },
+  paymentGateway: {
+    type: String,
+    enum: ['stripe', 'razorpay'],
+    default: 'stripe'
   },
   type: {
     type: String,

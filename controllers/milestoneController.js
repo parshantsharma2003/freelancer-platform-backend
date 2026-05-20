@@ -4,6 +4,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import {
   checkEscrowBalance,
   isAlreadyPaid,
+  startMilestoneWork,
   submitMilestoneWork,
   approveMilestoneWork,
   rejectMilestoneWork,
@@ -18,6 +19,13 @@ import {
 export const createMilestones = asyncHandler(async (req, res) => {
   const { contractId, milestones: milestonesData } = req.body;
 
+  if (!Array.isArray(milestonesData) || milestonesData.length === 0) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'At least one milestone is required'
+    });
+  }
+
   // Verify contract exists and user is client
   const contract = await Contract.findById(contractId);
 
@@ -25,6 +33,13 @@ export const createMilestones = asyncHandler(async (req, res) => {
     return res.status(404).json({
       status: 'error',
       message: 'Contract not found'
+    });
+  }
+
+  if (contract.status !== 'active') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Milestones can only be created on active contracts'
     });
   }
 
@@ -36,30 +51,65 @@ export const createMilestones = asyncHandler(async (req, res) => {
   }
 
   // Check contract type is fixed-price
-  if (contract.budget.type !== 'fixed') {
+  const normalizedBudgetType = String(contract?.budget?.type || 'fixed').toLowerCase();
+  const isFixedContract = ['fixed', 'fixed-price', 'fixed_price', 'fixedprice'].includes(normalizedBudgetType);
+
+  if (!isFixedContract) {
     return res.status(400).json({
       status: 'error',
       message: 'Milestones only available for fixed-price contracts'
     });
   }
 
-  // Validate total milestone amount doesn't exceed contract budget
-  const totalAmount = milestonesData.reduce((sum, m) => sum + m.amount, 0);
-  if (totalAmount > contract.budget.amount) {
+  const normalizedMilestones = milestonesData.map((milestone) => ({
+    title: String(milestone.title || '').trim(),
+    description: String(milestone.description || '').trim(),
+    amount: Number(milestone.amount),
+    dueDate: milestone.dueDate
+  }));
+
+  if (normalizedMilestones.some((milestone) => !milestone.title || !milestone.description || !milestone.dueDate)) {
     return res.status(400).json({
       status: 'error',
-      message: `Total milestone amount (${totalAmount}) exceeds contract budget (${contract.budget.amount})`
+      message: 'Each milestone must include a title, description, amount, and deadline'
+    });
+  }
+
+  if (normalizedMilestones.some((milestone) => !Number.isFinite(milestone.amount) || milestone.amount <= 0)) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Each milestone amount must be a valid positive number'
+    });
+  }
+
+  const now = new Date();
+  if (normalizedMilestones.some((milestone) => !milestone.dueDate || new Date(milestone.dueDate) <= now)) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Each milestone due date must be in the future'
+    });
+  }
+
+  // Validate total milestone amount equals contract budget
+  const totalAmount = normalizedMilestones.reduce((sum, m) => sum + m.amount, 0);
+  const contractTotalAmount = Number(contract?.budget?.amount || 0);
+  if (Math.abs(totalAmount - contractTotalAmount) > 0.01) {
+    return res.status(400).json({
+      status: 'error',
+      message: `Total milestone amount (${totalAmount}) must match contract amount (${contractTotalAmount})`
     });
   }
 
   // Create milestones
+  const existingCount = await Milestone.countDocuments({ contract: contractId });
   const createdMilestones = await Milestone.insertMany(
-    milestonesData.map(m => ({
+    normalizedMilestones.map((m, index) => ({
       contract: contractId,
       title: m.title,
       description: m.description || '',
       amount: m.amount,
       dueDate: m.dueDate,
+      orderIndex: existingCount + index,
       status: 'pending',
       statusHistory: [{
         status: 'pending',
@@ -96,6 +146,86 @@ export const createMilestones = asyncHandler(async (req, res) => {
       }
     }
   });
+});
+
+// @desc    Delete milestone before funding
+// @route   DELETE /api/milestones/:id
+// @access  Private (Client only)
+export const deleteMilestone = asyncHandler(async (req, res) => {
+  const milestone = await Milestone.findById(req.params.id);
+
+  if (!milestone) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Milestone not found'
+    });
+  }
+
+  const contract = await Contract.findById(milestone.contract);
+
+  if (!contract) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Contract not found'
+    });
+  }
+
+  if (contract.status !== 'active') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Milestones can only be deleted on active contracts before funding'
+    });
+  }
+
+  if (contract.client.toString() !== req.user._id.toString()) {
+    return res.status(403).json({
+      status: 'error',
+      message: 'Only client can delete milestones'
+    });
+  }
+
+  if (milestone.escrow?.isHeld || milestone.status !== 'pending') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Milestone can only be deleted before funding'
+    });
+  }
+
+  const remainingMilestones = await Milestone.find({
+    contract: contract._id,
+    _id: { $ne: milestone._id }
+  }).sort({ orderIndex: 1, createdAt: 1 });
+
+  await Milestone.deleteOne({ _id: milestone._id });
+
+  await Promise.all(
+    remainingMilestones.map((item, index) => Milestone.findByIdAndUpdate(item._id, { orderIndex: index }))
+  );
+
+  res.status(200).json({
+    status: 'success',
+    message: 'Milestone deleted successfully'
+  });
+});
+
+// @desc    Start milestone work
+// @route   POST /api/milestones/:id/start-work
+// @access  Private (Freelancer only)
+export const startMilestoneWorkHandler = asyncHandler(async (req, res) => {
+  try {
+    const milestone = await startMilestoneWork(req.params.id, req.user._id);
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Milestone marked as in progress',
+      data: { milestone }
+    });
+  } catch (error) {
+    res.status(400).json({
+      status: 'error',
+      message: error.message
+    });
+  }
 });
 
 // @desc    Get milestones for a contract
@@ -136,7 +266,8 @@ export const getMilestones = asyncHandler(async (req, res) => {
   const milestones = await Milestone.find({ contract: contractId })
     .populate('submission.submittedBy', 'firstName lastName')
     .populate('approval.approvedBy', 'firstName lastName')
-    .sort({ createdAt: 1 });
+    .populate('comments.user', 'firstName lastName avatar')
+    .sort({ orderIndex: 1, createdAt: 1 });
 
   // Get progress stats
   const progress = await getContractProgress(contractId);
@@ -158,6 +289,7 @@ export const getMilestoneById = asyncHandler(async (req, res) => {
     .populate('contract', 'client freelancer title budget')
     .populate('submission.submittedBy', 'firstName lastName email')
     .populate('approval.approvedBy', 'firstName lastName email')
+    .populate('comments.user', 'firstName lastName avatar email')
     .populate('payment.paymentId');
 
   if (!milestone) {
@@ -183,6 +315,270 @@ export const getMilestoneById = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     status: 'success',
+    data: { milestone }
+  });
+});
+
+// @desc    Reorder milestones in a contract
+// @route   POST /api/milestones/reorder
+// @access  Private (Client only)
+export const reorderMilestones = asyncHandler(async (req, res) => {
+  const { contractId, milestoneIds } = req.body;
+
+  if (!contractId || !Array.isArray(milestoneIds) || milestoneIds.length === 0) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'contractId and milestoneIds are required'
+    });
+  }
+
+  const contract = await Contract.findById(contractId);
+  if (!contract) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Contract not found'
+    });
+  }
+
+  if (contract.status !== 'active') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Milestones can only be reordered on active contracts before funding'
+    });
+  }
+
+  if (contract.client.toString() !== req.user._id.toString()) {
+    return res.status(403).json({
+      status: 'error',
+      message: 'Only client can reorder milestones'
+    });
+  }
+
+  const milestones = await Milestone.find({ contract: contractId });
+  if (milestones.length !== milestoneIds.length) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'milestoneIds must include all milestones for this contract'
+    });
+  }
+
+  const milestonesById = new Map(milestones.map((milestone) => [milestone._id.toString(), milestone]));
+  const unknownId = milestoneIds.find((id) => !milestonesById.has(String(id)));
+  if (unknownId) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Invalid milestone id in reorder list'
+    });
+  }
+
+  const hasFundedMilestone = milestoneIds.some((id) => {
+    const milestone = milestonesById.get(String(id));
+    return milestone?.escrow?.isHeld;
+  });
+
+  if (hasFundedMilestone) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Milestones cannot be reordered after funding'
+    });
+  }
+
+  await Promise.all(
+    milestoneIds.map((id, index) => Milestone.findByIdAndUpdate(id, { orderIndex: index }))
+  );
+
+  res.status(200).json({
+    status: 'success',
+    message: 'Milestones reordered successfully'
+  });
+});
+
+// @desc    Edit milestone before funding
+// @route   PATCH /api/milestones/:id
+// @access  Private (Client only)
+export const updateMilestone = asyncHandler(async (req, res) => {
+  const milestone = await Milestone.findById(req.params.id);
+  if (!milestone) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Milestone not found'
+    });
+  }
+
+  const contract = await Contract.findById(milestone.contract);
+  if (!contract) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Contract not found'
+    });
+  }
+
+  if (contract.status !== 'active') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Milestones can only be edited on active contracts before funding'
+    });
+  }
+
+  if (contract.client.toString() !== req.user._id.toString()) {
+    return res.status(403).json({
+      status: 'error',
+      message: 'Only client can edit milestones'
+    });
+  }
+
+  if (milestone.escrow?.isHeld || milestone.status !== 'pending') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Milestone can only be edited before funding'
+    });
+  }
+
+  const allowedFields = ['title', 'description', 'amount', 'dueDate'];
+  const updateData = {};
+  allowedFields.forEach((field) => {
+    if (req.body[field] !== undefined) {
+      updateData[field] = typeof req.body[field] === 'string' ? req.body[field].trim() : req.body[field];
+    }
+  });
+
+  if (updateData.title !== undefined && !updateData.title) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Milestone title is required'
+    });
+  }
+
+  if (updateData.description !== undefined && !updateData.description) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Milestone description is required'
+    });
+  }
+
+  if (updateData.amount !== undefined) {
+    updateData.amount = Number(updateData.amount);
+    if (!Number.isFinite(updateData.amount) || updateData.amount <= 0) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Milestone amount must be a valid positive number'
+      });
+    }
+  }
+
+  if (updateData.dueDate !== undefined) {
+    const dueDate = new Date(updateData.dueDate);
+    if (!Number.isFinite(dueDate.getTime()) || dueDate <= new Date()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Milestone due date must be in the future'
+      });
+    }
+  }
+
+  // Validate total milestones amount still matches contract amount.
+  const contractMilestones = await Milestone.find({ contract: contract._id });
+  const recomputedTotal = contractMilestones.reduce((sum, item) => {
+    if (item._id.toString() === milestone._id.toString()) {
+      return sum + Number(updateData.amount ?? item.amount);
+    }
+    return sum + Number(item.amount);
+  }, 0);
+
+  const contractTotalAmount = Number(contract?.budget?.amount || 0);
+  if (Math.abs(recomputedTotal - contractTotalAmount) > 0.01) {
+    return res.status(400).json({
+      status: 'error',
+      message: `Total milestone amount (${recomputedTotal}) must match contract amount (${contractTotalAmount})`
+    });
+  }
+
+  Object.assign(milestone, updateData);
+  await milestone.save();
+
+  res.status(200).json({
+    status: 'success',
+    message: 'Milestone updated successfully',
+    data: { milestone }
+  });
+});
+
+// @desc    Add attachment to milestone
+// @route   POST /api/milestones/:id/attachments
+// @access  Private (Client/Freelancer in contract)
+export const addMilestoneAttachment = asyncHandler(async (req, res) => {
+  const milestone = await Milestone.findById(req.params.id).populate('contract', 'client freelancer');
+  if (!milestone) {
+    return res.status(404).json({ status: 'error', message: 'Milestone not found' });
+  }
+
+  const isParticipant =
+    milestone.contract.client.toString() === req.user._id.toString() ||
+    milestone.contract.freelancer.toString() === req.user._id.toString() ||
+    req.user.role === 'super_admin';
+
+  if (!isParticipant) {
+    return res.status(403).json({ status: 'error', message: 'Not authorized' });
+  }
+
+  const { name, url, type, size } = req.body;
+  if (!name || !url) {
+    return res.status(400).json({ status: 'error', message: 'name and url are required' });
+  }
+
+  milestone.attachments.push({
+    name,
+    url,
+    type: type || 'application/octet-stream',
+    size: Number(size) || 0,
+    uploadedBy: req.user._id,
+    uploadedAt: new Date()
+  });
+
+  await milestone.save();
+
+  res.status(201).json({
+    status: 'success',
+    message: 'Attachment added',
+    data: { milestone }
+  });
+});
+
+// @desc    Add comment to milestone
+// @route   POST /api/milestones/:id/comments
+// @access  Private (Client/Freelancer in contract)
+export const addMilestoneComment = asyncHandler(async (req, res) => {
+  const milestone = await Milestone.findById(req.params.id).populate('contract', 'client freelancer');
+  if (!milestone) {
+    return res.status(404).json({ status: 'error', message: 'Milestone not found' });
+  }
+
+  const isParticipant =
+    milestone.contract.client.toString() === req.user._id.toString() ||
+    milestone.contract.freelancer.toString() === req.user._id.toString() ||
+    req.user.role === 'super_admin';
+
+  if (!isParticipant) {
+    return res.status(403).json({ status: 'error', message: 'Not authorized' });
+  }
+
+  const content = String(req.body.content || '').trim();
+  if (!content) {
+    return res.status(400).json({ status: 'error', message: 'Comment content is required' });
+  }
+
+  milestone.comments.push({
+    user: req.user._id,
+    content,
+    createdAt: new Date()
+  });
+
+  await milestone.save();
+  await milestone.populate('comments.user', 'firstName lastName avatar');
+
+  res.status(201).json({
+    status: 'success',
+    message: 'Comment added',
     data: { milestone }
   });
 });
@@ -249,6 +645,23 @@ export const approveMilestoneHandler = asyncHandler(async (req, res) => {
       });
     }
 
+    // Fetch milestone to check escrow status
+    const milestoneData = await Milestone.findById(req.params.id);
+    if (!milestoneData) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Milestone not found'
+      });
+    }
+
+    // Add validation before approval: Milestone must be funded
+    if (!milestoneData.escrow.isHeld) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Milestone not funded in escrow'
+      });
+    }
+
     // Approve milestone
     const result = await approveMilestoneWork(
       req.params.id,
@@ -305,7 +718,6 @@ export const approveMilestoneHandler = asyncHandler(async (req, res) => {
     });
   }
 });
-
 // @desc    Release payment for approved milestone
 // @route   POST /api/milestones/:id/release-payment
 // @access  Private (Client triggers, system processes)
@@ -388,6 +800,60 @@ export const releaseMilestonePayment = asyncHandler(async (req, res) => {
       message: error.message
     });
   }
+});
+
+// @desc    Get milestone attachment metadata
+// @route   GET /api/milestones/:id/attachments/:index
+// @access  Private
+export const getMilestoneAttachmentMetadata = asyncHandler(async (req, res) => {
+  const { id, index } = req.params;
+
+  const milestone = await Milestone.findById(id);
+
+  if (!milestone) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Milestone not found'
+    });
+  }
+
+  // Check authorization
+  const contract = await Contract.findById(milestone.contract);
+  const isAuthorized =
+    contract.client.toString() === req.user._id.toString() ||
+    contract.freelancer.toString() === req.user._id.toString() ||
+    req.user.role === 'super_admin';
+
+  if (!isAuthorized) {
+    return res.status(403).json({
+      status: 'error',
+      message: 'Not authorized to view this milestone'
+    });
+  }
+
+  // Get attachment from submission.attachments
+  const attachments = milestone.submission?.attachments || [];
+  const attachmentIndex = parseInt(index);
+
+  if (attachmentIndex < 0 || attachmentIndex >= attachments.length) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Attachment not found'
+    });
+  }
+
+  const attachment = attachments[attachmentIndex];
+
+  res.status(200).json({
+    status: 'success',
+    data: {
+      attachment: {
+        name: attachment.name || 'attachment',
+        url: attachment.url,
+        uploadedAt: attachment.uploadedAt
+      }
+    }
+  });
 });
 
 // @desc    Get contract progress

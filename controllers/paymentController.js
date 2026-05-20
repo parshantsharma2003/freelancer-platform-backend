@@ -2,6 +2,7 @@ import stripe from '../utils/stripeClient.js';
 import Payment from '../models/Payment.js';
 import Contract from '../models/Contract.js';
 import User from '../models/User.js';
+import Milestone from '../models/Milestone.js';
 import Dispute from '../models/Dispute.js';
 import Notification from '../models/Notification.js';
 import notificationService from '../services/notificationService.js';
@@ -11,7 +12,16 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 // @route   POST /api/payments
 // @access  Private (Clients only)
 export const createPayment = asyncHandler(async (req, res) => {
-  const { contractId, amount, type, milestoneId } = req.body;
+  const { contractId, amount, type, milestoneId, paymentGateway = 'stripe' } = req.body;
+
+  // --- Fraud Prevention Logic ---
+  if (req.user.fraud?.riskScore > 80) {
+    return res.status(403).json({
+      status: 'error',
+      message: 'Payment blocked due to risk'
+    });
+  }
+  // ------------------------------
 
   const contract = await Contract.findById(contractId);
 
@@ -19,6 +29,13 @@ export const createPayment = asyncHandler(async (req, res) => {
     return res.status(404).json({
       status: 'error',
       message: 'Contract not found'
+    });
+  }
+
+  if (!['stripe', 'razorpay'].includes(String(paymentGateway))) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Unsupported payment gateway'
     });
   }
 
@@ -30,17 +47,67 @@ export const createPayment = asyncHandler(async (req, res) => {
     });
   }
 
+  if (type === 'deposit') {
+    if (!milestoneId) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'milestoneId is required for deposit payments'
+      });
+    }
+
+    const milestone = await Milestone.findById(milestoneId);
+    if (!milestone || milestone.contract.toString() !== contractId.toString()) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid milestone for this contract'
+      });
+    }
+
+    if (milestone.escrow?.isHeld || milestone.escrow?.paymentReleased) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Milestone is already funded or paid'
+      });
+    }
+
+    if (Number(amount) !== Number(milestone.amount)) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Deposit amount must match milestone amount exactly'
+      });
+    }
+  }
+
+  // Prevent duplicate milestone deposits
+  const existingDeposit = await Payment.findOne({
+    milestone: milestoneId,
+    type: 'deposit',
+    status: { $in: ['processing', 'held-in-escrow'] }
+  });
+
+  if (existingDeposit) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Milestone already funded'
+    });
+  }
+
   const currency = (contract.budget?.currency || 'USD').toLowerCase();
   let stripePaymentIntent = null;
+  
   if (type === 'deposit') {
-    stripePaymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(Number(amount) * 100),
-      currency,
-      metadata: {
-        contractId: contractId.toString(),
-        clientId: req.user._id.toString()
-      }
-    });
+    if (paymentGateway === 'stripe') {
+      stripePaymentIntent = await stripe.paymentIntents.create({
+        amount: Math.round(Number(amount) * 100),
+        currency,
+        capture_method: 'manual', // Add manual capture for escrow
+        metadata: {
+          contractId: contractId.toString(),
+          clientId: req.user._id.toString(),
+          milestoneId: milestoneId?.toString() || ''
+        }
+      });
+    }
   }
 
   const payment = await Payment.create({
@@ -49,6 +116,7 @@ export const createPayment = asyncHandler(async (req, res) => {
     freelancer: contract.freelancer,
     amount,
     currency: contract.budget?.currency || 'USD',
+    paymentGateway,
     type,
     milestone: milestoneId,
     status: type === 'deposit' ? 'processing' : 'pending',
@@ -62,6 +130,30 @@ export const createPayment = asyncHandler(async (req, res) => {
   // Calculate fees
   payment.calculateFees();
   await payment.save();
+
+  if (type === 'deposit') {
+    payment.status = 'held-in-escrow';
+    payment.escrow.isEscrowed = true;
+    payment.escrow.depositedAt = new Date();
+    await payment.save();
+
+    await Milestone.findByIdAndUpdate(milestoneId, {
+      status: 'funded',
+      'escrow.isHeld': true,
+      'escrow.heldAmount': Number(amount),
+      'escrow.heldAt': new Date(),
+      'payment.paymentId': payment._id,
+      'payment.status': 'completed',
+      $push: {
+        statusHistory: {
+          status: 'funded',
+            changedAt: new Date(),
+          changedBy: req.user._id,
+            reason: `Escrow deposit confirmed via ${paymentGateway}`
+        }
+      }
+    });
+  }
 
   res.status(201).json({
     status: 'success',
@@ -102,6 +194,26 @@ export const releasePayment = asyncHandler(async (req, res) => {
     });
   }
 
+  const milestone = await Milestone.findById(payment.milestone);
+  if (!milestone) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Milestone not found for this payment'
+    });
+  }
+
+  if (milestone.status !== 'approved') {
+    return res.status(400).json({
+      status: 'error',
+      message: `Milestone must be approved before release. Current status: ${milestone.status}`
+    });
+  }
+
+  // Capture payment before transfer
+  if (payment.stripe?.paymentIntentId) {
+    await stripe.paymentIntents.capture(payment.stripe.paymentIntentId);
+  }
+
   // Release payment
   const freelancer = await User.findById(payment.freelancer).select('stripeConnect');
   let transferId = null;
@@ -127,6 +239,47 @@ export const releasePayment = asyncHandler(async (req, res) => {
   }
   await payment.save();
 
+  const walletCreditAmount = Number(payment.amount || payment.netAmount || 0);
+  const freelancerWalletBefore = Number(freelancer?.wallet?.availableBalance || 0);
+  const freelancerWalletAfter = freelancerWalletBefore + walletCreditAmount;
+
+  await User.findByIdAndUpdate(payment.freelancer, {
+    $inc: {
+      'wallet.availableBalance': walletCreditAmount,
+      'wallet.totalEarnings': walletCreditAmount
+    },
+    $set: {
+      'wallet.lastUpdatedAt': new Date()
+    }
+  });
+
+  await Milestone.findByIdAndUpdate(payment.milestone, {
+    status: 'paid',
+    'escrow.paymentReleased': true,
+    'escrow.releasedAt': new Date(),
+    'escrow.releaseTransactionId': payment._id.toString(),
+    'payment.paymentId': payment._id,
+    'payment.paidAt': new Date(),
+    'payment.paidAmount': payment.netAmount,
+    'payment.netAmount': payment.netAmount,
+    'payment.status': 'completed',
+    $push: {
+      statusHistory: {
+        status: 'paid',
+        changedAt: new Date(),
+        changedBy: req.user._id,
+        reason: 'Escrow funds released to freelancer'
+      }
+    }
+  });
+
+  payment.wallet = {
+    transactionId: payment._id.toString(),
+    balanceBefore: freelancerWalletBefore,
+    balanceAfter: freelancerWalletAfter
+  };
+  await payment.save();
+
   // Update contract
   await Contract.findByIdAndUpdate(payment.contract._id, {
     $inc: { totalPaid: payment.netAmount }
@@ -136,12 +289,15 @@ export const releasePayment = asyncHandler(async (req, res) => {
   try {
     const io = req.app.get('io');
     if (io) {
-      io.to(`user:${req.user._id}`).emit('payment_completed', {
+      const paymentPayload = {
         paymentId: payment._id,
         amount: payment.netAmount,
         contractId: payment.contract._id,
         timestamp: new Date()
-      });
+      };
+
+      io.to(`user:${req.user._id}`).emit('payment_completed', paymentPayload);
+      io.to(`user:${payment.freelancer}`).emit('payment_completed', paymentPayload);
     }
   } catch (socketError) {
     console.log('[Socket] Payment completed event failed (non-critical):', socketError.message);
@@ -194,7 +350,7 @@ export const stripeWebhook = asyncHandler(async (req, res) => {
     });
   }
 
-  if (event.type === 'payment_intent.succeeded') {
+  if (event.type === 'payment_intent.succeeded' || event.type === 'payment_intent.amount_capturable_updated') {
     const paymentIntent = event.data.object;
 
     const payment = await Payment.findOne({ 'stripe.paymentIntentId': paymentIntent.id });
@@ -205,6 +361,23 @@ export const stripeWebhook = asyncHandler(async (req, res) => {
       payment.escrow.isEscrowed = true;
       payment.escrow.depositedAt = new Date();
       await payment.save();
+
+      await Milestone.findByIdAndUpdate(payment.milestone, {
+        status: 'funded',
+        'escrow.isHeld': true,
+        'escrow.heldAmount': payment.amount,
+        'escrow.heldAt': new Date(),
+        'escrow.stripePaymentIntentId': paymentIntent.id,
+        'payment.paymentId': payment._id,
+        'payment.status': 'processing',
+        $push: {
+          statusHistory: {
+            status: 'funded',
+            changedAt: new Date(),
+            reason: 'Escrow deposit confirmed'
+          }
+        }
+      });
     }
   }
 
@@ -288,6 +461,85 @@ export const stripeWebhook = asyncHandler(async (req, res) => {
   }
 
   res.status(200).json({ received: true });
+});
+
+// @desc    Refund escrow payment back to client
+// @route   POST /api/payments/:id/refund
+// @access  Private (Client only)
+export const refundPayment = asyncHandler(async (req, res) => {
+  const payment = await Payment.findById(req.params.id).populate('contract');
+
+  if (!payment) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Payment not found'
+    });
+  }
+
+  if (payment.client.toString() !== req.user._id.toString() && req.user.role !== 'super_admin') {
+    return res.status(403).json({
+      status: 'error',
+      message: 'Not authorized to refund this payment'
+    });
+  }
+
+  if (payment.type !== 'deposit' || payment.status !== 'held-in-escrow') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Only held escrow deposits can be refunded'
+    });
+  }
+
+  if (payment.stripe?.paymentIntentId) {
+    try {
+      const refund = await stripe.refunds.create({
+        payment_intent: payment.stripe.paymentIntentId
+      });
+      payment.stripe.refundId = refund.id;
+    } catch (error) {
+      return res.status(400).json({
+        status: 'error',
+        message: `Refund failed: ${error.message}`
+      });
+    }
+  }
+
+  payment.status = 'refunded';
+  payment.processedAt = new Date();
+  payment.escrow.releasedAt = new Date();
+  await payment.save();
+
+  await Milestone.findByIdAndUpdate(payment.milestone, {
+    status: 'refunded',
+    'escrow.isHeld': false,
+    'escrow.heldAmount': 0,
+    'escrow.refundedAt': new Date(),
+    'payment.status': 'failed',
+    $push: {
+      statusHistory: {
+        status: 'refunded',
+        changedAt: new Date(),
+        changedBy: req.user._id,
+        reason: req.body.reason || 'Escrow refunded to client'
+      }
+    }
+  });
+
+  await Notification.create({
+    recipient: payment.freelancer,
+    type: 'payment_refunded',
+    title: 'Escrow Refunded',
+    message: `Escrow for contract "${payment.contract.title}" was refunded to the client`,
+    relatedContract: payment.contract._id,
+    actionUrl: `/payments/${payment._id}`,
+    priority: 'high'
+  });
+
+  res.status(200).json({
+    status: 'success',
+    message: 'Escrow refunded successfully',
+    data: { payment }
+  });
 });
 
 // @desc    Create Stripe Connect account
@@ -496,13 +748,21 @@ export const getPaymentStats = asyncHandler(async (req, res) => {
       $group: {
         _id: '$status',
         count: { $sum: 1 },
-        totalAmount: { $sum: '$amount' }
+        totalAmount: { $sum: { $ifNull: ['$netAmount', '$amount'] } }
       }
     }
   ]);
 
   // Calculate derived metrics
-  const successfulPayments = stats.find(s => s._id === 'released') || { totalAmount: 0, count: 0 };
+  const successfulPayments = stats
+    .filter(s => ['completed', 'released'].includes(s._id))
+    .reduce(
+      (acc, current) => ({
+        totalAmount: acc.totalAmount + (current.totalAmount || 0),
+        count: acc.count + (current.count || 0)
+      }),
+      { totalAmount: 0, count: 0 }
+    );
   const totalStats = stats.reduce((sum, s) => sum + s.count, 0);
   const successRate = totalStats > 0 ? Math.round((successfulPayments.count / totalStats) * 100) : 0;
 
@@ -524,19 +784,16 @@ export const getEarningsByMonth = asyncHandler(async (req, res) => {
   const { months = 6 } = req.query;
   const numMonths = Math.min(Math.max(1, parseInt(months)), 12);
 
-  // For freelancers: earnings are when they receive payments (released status)
-  // For clients: spending is when they send payments (released status)
+  // MatchStage logic...
   const matchStage = {
     $match: {
-      status: 'released',
+      status: { $in: ['completed', 'released'] },
       createdAt: {
         $gte: new Date(Date.now() - numMonths * 30 * 24 * 60 * 60 * 1000)
       }
     }
   };
 
-  // If freelancer, match earnings (payments to them)
-  // If client, match spending (payments from them)
   if (req.user.role === 'freelancer') {
     matchStage.$match.freelancer = req.user._id;
   } else {
@@ -551,7 +808,7 @@ export const getEarningsByMonth = asyncHandler(async (req, res) => {
           year: { $year: '$createdAt' },
           month: { $month: '$createdAt' }
         },
-        total: { $sum: '$amount' },
+        total: { $sum: { $ifNull: ['$netAmount', '$amount'] } },
         count: { $sum: 1 }
       }
     },
@@ -560,14 +817,12 @@ export const getEarningsByMonth = asyncHandler(async (req, res) => {
     }
   ]);
 
-  // Format for chart
   const months_obj = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const chartData = earnings.map(e => ({
     name: months_obj[e._id.month - 1],
     earnings: e.total
   }));
 
-  // Fill in missing months with 0
   const now = new Date();
   const allMonths = [];
   for (let i = numMonths - 1; i >= 0; i--) {

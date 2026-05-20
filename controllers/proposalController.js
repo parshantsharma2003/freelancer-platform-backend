@@ -400,14 +400,61 @@ export const acceptProposal = asyncHandler(async (req, res) => {
   proposal.respondedAt = new Date();
   await proposal.save();
 
+  // Close all other active proposals for the same job.
+  await Proposal.updateMany(
+    {
+      job: proposal.job._id,
+      _id: { $ne: proposal._id },
+      status: { $in: ['pending', 'shortlisted'] }
+    },
+    {
+      $set: {
+        status: 'declined',
+        respondedAt: new Date()
+      }
+    }
+  );
+
   // Update job
   await Job.findByIdAndUpdate(proposal.job._id, {
     status: 'in-progress',
-    hiredFreelancer: proposal.freelancer
+    hiredFreelancer: proposal.freelancer,
+    isPublished: false
   });
 
   // STRICT: contract must exist for accepted proposals
   const contract = await createContractFromProposal(proposal, proposal.job);
+
+  // Emit real-time events so freelancer dashboard counters update immediately.
+  try {
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`user:${proposal.freelancer}`).emit('proposal:accepted', {
+        proposalId: proposal._id,
+        jobId: proposal.job._id,
+        jobTitle: proposal.job.title,
+        timestamp: new Date()
+      });
+
+      io.to(`user:${proposal.freelancer}`).emit('contract_created', {
+        contractId: contract._id,
+        title: contract.title,
+        jobId: proposal.job._id,
+        status: contract.status,
+        timestamp: new Date()
+      });
+
+      io.to(`user:${proposal.job.client}`).emit('contract_created', {
+        contractId: contract._id,
+        title: contract.title,
+        jobId: proposal.job._id,
+        status: contract.status,
+        timestamp: new Date()
+      });
+    }
+  } catch (socketError) {
+    console.log('[Socket] Failed to emit proposal/contract acceptance updates:', socketError.message);
+  }
 
   // Notify freelancer of contract creation and proposal acceptance via notification service
   try {
@@ -421,7 +468,7 @@ export const acceptProposal = asyncHandler(async (req, res) => {
         recipient: proposal.freelancer,
         type: 'contract_created',
         title: 'Contract Created',
-        message: `Your contract for "${proposal.job.title}" is now active`,
+        message: `Your contract for "${proposal.job.title}" is ready for review`,
         relatedContract: contract._id,
         relatedUser: req.user._id,
         actionUrl: `/contracts/${contract._id}`,

@@ -34,15 +34,22 @@ export const isEscrowHeld = async (milestoneId) => {
  * Called after payment deposit is confirmed
  */
 export const holdEscrowFunds = async (milestoneId, paymentId) => {
+  const existingMilestone = await Milestone.findById(milestoneId);
+  if (!existingMilestone) {
+    throw new Error('Milestone not found');
+  }
+
   const milestone = await Milestone.findByIdAndUpdate(
     milestoneId,
     {
       'escrow.isHeld': true,
-      'escrow.heldAmount': milestone.amount,
+      'escrow.heldAmount': existingMilestone.amount,
       'escrow.heldAt': new Date(),
+      'payment.paymentId': paymentId,
+      status: 'funded',
       $push: {
         statusHistory: {
-          status: 'pending',
+          status: 'funded',
           changedAt: new Date(),
           reason: 'Escrow funds held'
         }
@@ -60,6 +67,51 @@ export const holdEscrowFunds = async (milestoneId, paymentId) => {
 export const isAlreadyPaid = async (milestoneId) => {
   const milestone = await Milestone.findById(milestoneId);
   return milestone?.escrow?.paymentReleased || false;
+};
+
+/**
+ * Mark milestone as in progress (freelancer only)
+ */
+export const startMilestoneWork = async (milestoneId, freelancerId) => {
+  const milestone = await Milestone.findById(milestoneId);
+
+  if (!milestone) {
+    throw new Error('Milestone not found');
+  }
+
+  const contract = await Contract.findById(milestone.contract);
+  if (!contract || contract.freelancer.toString() !== freelancerId.toString()) {
+    throw new Error('Only assigned freelancer can start milestone work');
+  }
+
+  if (!milestone.escrow?.isHeld) {
+    throw new Error('Milestone must be funded before starting work');
+  }
+
+  const allowedStartStatuses = ['funded', 'changes_requested'];
+  if (!allowedStartStatuses.includes(milestone.status)) {
+    throw new Error(
+      `Milestone must be in funded or changes_requested status to start work. Current status: ${milestone.status}`
+    );
+  }
+
+  const updatedMilestone = await Milestone.findByIdAndUpdate(
+    milestoneId,
+    {
+      status: 'in_progress',
+      $push: {
+        statusHistory: {
+          status: 'in_progress',
+          changedAt: new Date(),
+          changedBy: freelancerId,
+          reason: 'Freelancer started milestone work'
+        }
+      }
+    },
+    { new: true }
+  );
+
+  return updatedMilestone;
 };
 
 /**
@@ -165,15 +217,40 @@ export const submitMilestoneWork = async (
     throw new Error('Milestone not found');
   }
 
+  // Add escrow protection. Reconcile from payment record if webhook/milestone sync lagged.
+  if (!milestone.escrow.isHeld) {
+    const escrowDeposit = await Payment.findOne({
+      milestone: milestoneId,
+      type: 'deposit',
+      status: 'held-in-escrow'
+    }).sort({ createdAt: -1 });
+
+    if (escrowDeposit) {
+      milestone.escrow.isHeld = true;
+      milestone.escrow.heldAmount = escrowDeposit.amount;
+      milestone.escrow.heldAt = milestone.escrow.heldAt || new Date();
+      if (milestone.status === 'pending') {
+        milestone.status = 'funded';
+      }
+      await milestone.save();
+    }
+  }
+
+  if (!milestone.escrow.isHeld) {
+    throw new Error('Milestone must be funded before submitting work');
+  }
+
   // Only freelancer can submit work
   const contract = await Contract.findById(milestone.contract);
   if (contract.freelancer.toString() !== freelancerId.toString()) {
     throw new Error('Only assigned freelancer can submit work');
   }
 
-  // Cannot submit if already approved or paid
-  if (['approved', 'paid'].includes(milestone.status)) {
-    throw new Error('Cannot submit milestone that is already approved or paid');
+  const allowedSubmissionStatuses = ['in_progress'];
+  if (!allowedSubmissionStatuses.includes(milestone.status)) {
+    throw new Error(
+      `Milestone must be in in_progress status before submission. Current status: ${milestone.status}`
+    );
   }
 
   const updatedMilestone = await Milestone.findByIdAndUpdate(
@@ -199,7 +276,6 @@ export const submitMilestoneWork = async (
 
   return updatedMilestone;
 };
-
 /**
  * Approve milestone work (client only)
  */
@@ -232,6 +308,7 @@ export const approveMilestoneWork = async (
     const updatedMilestone = await Milestone.findByIdAndUpdate(
       milestoneId,
       {
+        status: 'changes_requested',
         'approval.approvedAt': new Date(),
         'approval.approvedBy': clientId,
         'approval.feedback': approvalData.feedback || '',
@@ -239,7 +316,7 @@ export const approveMilestoneWork = async (
         'approval.revisionNotes': approvalData.revisionNotes || '',
         $push: {
           statusHistory: {
-            status: 'submitted',
+            status: 'changes_requested',
             changedAt: new Date(),
             changedBy: clientId,
             reason: 'Revision requested'
@@ -339,7 +416,7 @@ export const getContractProgress = async (contractId) => {
   const total = milestones.length;
   const completed = milestones.filter(m => m.status === 'paid').length;
   const inReview = milestones.filter(m => m.status === 'submitted').length;
-  const pending = milestones.filter(m => m.status === 'pending').length;
+  const pending = milestones.filter(m => ['pending', 'funded', 'changes_requested', 'in_progress'].includes(m.status)).length;
 
   const totalBudget = milestones.reduce((sum, m) => sum + m.amount, 0);
   const releasedAmount = milestones
@@ -409,7 +486,7 @@ export const notifyMilestoneStatusChange = async (
       relatedContract: contract._id,
       relatedMilestone: milestone._id,
       actionUrl: `/contracts/${contract._id}/milestones/${milestone._id}`,
-      priority: notifData.priority || 'normal'
+      priority: notifData.priority || 'medium'
     });
   }
 };

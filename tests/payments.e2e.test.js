@@ -7,15 +7,23 @@ let app;
 let mongo;
 
 const registerAndLogin = async (role, email) => {
-  await request(app)
+  const registerRes = await request(app)
     .post('/api/auth/register')
     .send({
+      fullName: role === 'client' ? 'Client User' : 'Freelancer User',
       email,
       password: 'TestPass123!',
-      firstName: role === 'client' ? 'Client' : 'Freelancer',
-      lastName: 'User',
+      confirmPassword: 'TestPass123!',
       role
     });
+
+  const verificationToken = registerRes.body?.data?.verificationToken;
+
+  if (verificationToken) {
+    await request(app)
+      .get(`/api/auth/verify-email/${verificationToken}`)
+      .send();
+  }
 
   const loginRes = await request(app)
     .post('/api/auth/login')
@@ -91,11 +99,35 @@ describe('Payments E2E', () => {
 
     const contractId = contractRes.body.data.contract._id;
 
+    await request(app)
+      .post(`/api/contracts/${contractId}/accept`)
+      .set('Authorization', `Bearer ${freelancerToken}`)
+      .send();
+
+    const milestonesRes = await request(app)
+      .post('/api/milestones')
+      .set('Authorization', `Bearer ${clientToken}`)
+      .send({
+        contractId,
+        milestones: [
+          {
+            title: 'Milestone 1',
+            description: 'First delivery phase',
+            amount: 500,
+            dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+          }
+        ]
+      });
+
+    expect(milestonesRes.status).toBe(201);
+    const milestoneId = milestonesRes.body.data.milestones[0]._id;
+
     const paymentRes = await request(app)
       .post('/api/payments')
       .set('Authorization', `Bearer ${clientToken}`)
       .send({
         contractId,
+        milestoneId,
         amount: 500,
         type: 'deposit'
       });
@@ -119,6 +151,31 @@ describe('Payments E2E', () => {
       .set('stripe-signature', 'test')
       .set('Content-Type', 'application/json')
       .send(webhookPayload);
+
+    const startWorkRes = await request(app)
+      .post(`/api/milestones/${milestoneId}/start-work`)
+      .set('Authorization', `Bearer ${freelancerToken}`)
+      .send();
+
+    expect(startWorkRes.status).toBe(200);
+
+    const submitRes = await request(app)
+      .post(`/api/milestones/${milestoneId}/submit`)
+      .set('Authorization', `Bearer ${freelancerToken}`)
+      .send({
+        description: 'Milestone work submission for review'
+      });
+
+    expect(submitRes.status).toBe(200);
+
+    const approveRes = await request(app)
+      .post(`/api/milestones/${milestoneId}/approve`)
+      .set('Authorization', `Bearer ${clientToken}`)
+      .send({
+        feedback: 'Looks good'
+      });
+
+    expect(approveRes.status).toBe(200);
 
     const releaseRes = await request(app)
       .post(`/api/payments/${paymentId}/release`)

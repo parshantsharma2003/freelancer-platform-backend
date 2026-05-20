@@ -1,634 +1,1031 @@
-import crypto from 'crypto';
-import User from '../models/User.js';
-import { generateTokens, verifyRefreshToken } from '../utils/jwtUtils.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
-import { logAuditEvent } from '../utils/auditLogger.js';
-import { sendEmail } from '../utils/emailService.js';
-import { sendSms } from '../utils/smsService.js';
+import crypto from "crypto";
+import User from "../models/User.js";
+import {
+  generateTokens,
+  verifyAccessToken,
+  verifyRefreshToken,
+  hashToken
+} from "../utils/jwtUtils.js";
+import { asyncHandler } from "../middleware/errorHandler.js";
+import { sendEmail } from "../utils/emailService.js";
+import { sendSms } from "../utils/smsService.js";
+import { calculateRiskScore } from "../services/fraudService.js";
+import {
+  getAuthCookieOptions,
+  getClearAuthCookieOptions
+} from "../utils/cookieOptions.js";
+import { deleteOtpData, getOtpData, getTtlSeconds, setOtpData } from "../utils/otpStore.js";
+
+const frontendBaseUrl = (
+  process.env.FRONTEND_URL ||
+  process.env.OAUTH_SUCCESS_REDIRECT ||
+  "http://localhost:5173"
+).replace(/\/+$/, "");
 
 const createVerificationToken = () => {
-  const token = crypto.randomBytes(20).toString('hex');
-  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const token = crypto.randomBytes(20).toString("hex");
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   return { token, tokenHash };
 };
 
 const createVerificationCode = () => {
   const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+  const codeHash = crypto.createHash("sha256").update(code).digest("hex");
   return { code, codeHash };
 };
 
-// @desc    Register a new user
-// @route   POST /api/auth/register
-// @access  Public
-export const register = asyncHandler(async (req, res) => {
-  const { email, phone, password, firstName, lastName, role, provider, providerUserId } = req.body;
+const OTP_TTL_SECONDS = 10 * 60;
+const OTP_COOLDOWN_SECONDS = 30;
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_LOCK_SECONDS = 15 * 60;
 
-  if (!email && !phone && !provider) {
+const normalizeEmail = (value = "") => String(value).trim().toLowerCase();
+
+const createEmailOtp = () => {
+  const otp = crypto.randomInt(100000, 1000000).toString();
+  const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+  return { otp, otpHash };
+};
+
+const getOtpKeys = (email, flow = 'login') => ({
+  otpKey: `auth:${flow}_otp:${email}`,
+  cooldownKey: `auth:${flow}_otp:cooldown:${email}`,
+  lockKey: `auth:${flow}_otp:lock:${email}`
+});
+
+const getPendingRegistrationKey = (email) => `auth:registration_pending:${email}`;
+
+const sendOtpEmail = async ({ user, otp, purpose }) => {
+  const subject = purpose === 'login'
+    ? 'Your FreelancePro login code'
+    : 'Verify your FreelancePro account';
+
+  await sendEmail({
+    to: user.email,
+    subject,
+    template: purpose === 'login' ? 'login-otp' : 'verification-otp',
+    templateData: {
+      name: user.firstName || user.email,
+      otp,
+      purpose,
+      expiresInMinutes: Math.round(OTP_TTL_SECONDS / 60)
+    }
+  });
+};
+
+const queueOtpChallenge = async ({ user, purpose = 'login' }) => {
+  const email = normalizeEmail(user.email);
+  const { otpKey, cooldownKey, lockKey } = getOtpKeys(email, purpose);
+
+  const lockTtl = await getTtlSeconds(lockKey);
+  if (lockTtl > 0) {
+    return {
+      ok: false,
+      statusCode: 429,
+      message: `Too many failed attempts. Try again in ${lockTtl}s`
+    };
+  }
+
+  const cooldownTtl = await getTtlSeconds(cooldownKey);
+  if (cooldownTtl > 0) {
+    return {
+      ok: false,
+      statusCode: 429,
+      message: `Please wait ${cooldownTtl}s before requesting a new OTP`
+    };
+  }
+
+  const { otp, otpHash } = createEmailOtp();
+
+  await setOtpData(
+    otpKey,
+    {
+      email,
+      purpose,
+      otpHash,
+      attempts: 0,
+      createdAt: new Date().toISOString()
+    },
+    OTP_TTL_SECONDS
+  );
+
+  await setOtpData(cooldownKey, { sent: true }, OTP_COOLDOWN_SECONDS);
+  await sendOtpEmail({ user, otp, purpose });
+
+  return {
+    ok: true,
+    otp,
+    otpKey,
+    purpose,
+    email
+  };
+};
+
+const splitFullName = (fullName = '', fallbackFirstName = '', fallbackLastName = '') => {
+  if (fallbackFirstName || fallbackLastName) {
+    return {
+      firstName: String(fallbackFirstName || '').trim(),
+      lastName: String(fallbackLastName || '').trim()
+    };
+  }
+
+  const cleaned = String(fullName).trim().replace(/\s+/g, ' ');
+  const parts = cleaned.split(' ').filter(Boolean);
+
+  if (parts.length === 0) {
+    return { firstName: '', lastName: '' };
+  }
+
+  if (parts.length === 1) {
+    return { firstName: parts[0], lastName: '-' };
+  }
+
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' ')
+  };
+};
+
+/*
+|--------------------------------------------------------------------------
+| REGISTER
+|--------------------------------------------------------------------------
+*/
+
+export const register = asyncHandler(async (req, res) => {
+  const { fullName, firstName: rawFirstName, lastName: rawLastName, email, phone, password, role } = req.body;
+  const normalizedEmail = normalizeEmail(email);
+  const { firstName, lastName } = splitFullName(fullName, rawFirstName, rawLastName);
+
+  if (!role) {
     return res.status(400).json({
-      status: 'error',
-      message: 'Email, phone, or OAuth provider is required'
+      status: "error",
+      message: "Role is required"
     });
   }
 
-  if (!provider && !password) {
+  if (!firstName || !lastName) {
     return res.status(400).json({
-      status: 'error',
-      message: 'Password is required for email/phone registration'
+      status: "error",
+      message: "Full name is required"
     });
   }
 
   const existingUser = await User.findOne({
-    $or: [
-      email ? { email } : null,
-      phone ? { phone } : null,
-      provider && providerUserId ? { 'oauthProviders.provider': provider, 'oauthProviders.providerUserId': providerUserId } : null
-    ].filter(Boolean)
+    $or: [normalizedEmail ? { email: normalizedEmail } : null, phone ? { phone } : null].filter(Boolean)
   });
 
   if (existingUser) {
     return res.status(400).json({
-      status: 'error',
-      message: 'User already exists with these credentials'
+      status: "error",
+      message: "User already exists"
     });
   }
 
-  const user = await User.create({
-    email,
-    phone,
-    password,
-    firstName,
-    lastName,
-    role: role || 'client',
-    accountStatus: provider ? 'active' : 'pending_verification',
-    emailVerified: Boolean(provider && email),
-    isVerified: Boolean(provider),
-    phoneVerified: false,
-    oauthProviders: provider ? [{ provider, providerUserId, email }] : []
+  const pendingRegistrationKey = getPendingRegistrationKey(normalizedEmail);
+  const existingPendingRegistration = await getOtpData(pendingRegistrationKey);
+
+  if (existingPendingRegistration) {
+    return res.status(409).json({
+      status: "error",
+      message: "Verification is already pending for this email. Please check your inbox or resend the OTP."
+    });
+  }
+
+  await setOtpData(
+    pendingRegistrationKey,
+    {
+      email: normalizedEmail,
+      phone: phone || undefined,
+      password,
+      firstName,
+      lastName,
+      role,
+      createdAt: new Date().toISOString()
+    },
+    OTP_TTL_SECONDS
+  );
+
+  const challenge = await queueOtpChallenge({
+    user: {
+      email: normalizedEmail,
+      firstName,
+      lastName,
+    },
+    purpose: 'registration'
   });
 
-  const { accessToken, refreshToken } = generateTokens(user._id, user.role);
+  if (!challenge.ok) {
+    await deleteOtpData(pendingRegistrationKey);
 
-  user.refreshToken = refreshToken;
-  await user.save();
-
-  await logAuditEvent({
-    actor: user._id,
-    actorRole: user.role,
-    action: 'auth.register',
-    targetType: 'User',
-    targetId: user._id,
-    summary: 'User registration',
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent']
-  });
+    return res.status(challenge.statusCode).json({
+      status: "error",
+      message: challenge.message
+    });
+  }
 
   res.status(201).json({
-    status: 'success',
-    message: 'User registered successfully',
+    status: "success",
+    message: "Verification OTP sent. Your account will be created after the OTP is verified.",
     data: {
-      user: {
-        id: user._id,
-        email: user.email,
-        phone: user.phone,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-        accountStatus: user.accountStatus
-      },
-      accessToken,
-      refreshToken
+      requiresEmailVerification: true,
+      pendingRegistration: true,
+      verificationMethod: "otp",
+      email: normalizedEmail,
+      otpExpiresInMinutes: Math.round(OTP_TTL_SECONDS / 60),
+      ...(process.env.NODE_ENV === "production" ? {} : { verificationOtp: challenge.otp })
     }
   });
 });
 
-// @desc    Login user
-// @route   POST /api/auth/login
-// @access  Public
+/*
+|--------------------------------------------------------------------------
+| LOGIN
+|--------------------------------------------------------------------------
+*/
+
 export const login = asyncHandler(async (req, res) => {
-  const { email, phone, identifier, password, provider, providerUserId } = req.body;
+  const { email, password } = req.body;
 
-  let query = {};
-
-  if (provider && providerUserId) {
-    query = { 'oauthProviders.provider': provider, 'oauthProviders.providerUserId': providerUserId };
-  } else if (email || phone || identifier) {
-    query = {
-      $or: [
-        email ? { email } : null,
-        phone ? { phone } : null,
-        identifier ? { email: identifier } : null,
-        identifier ? { phone: identifier } : null
-      ].filter(Boolean)
-    };
-  }
-
-  if (!Object.keys(query).length) {
+  if (!email || !password) {
     return res.status(400).json({
-      status: 'error',
-      message: 'Login identifier is required'
+      status: "error",
+      message: "Email and password are required"
     });
   }
 
-  const user = await User.findOne(query).select('+password');
+  const user = await User.findOne({ email }).select("+password +refreshToken");
 
   if (!user) {
     return res.status(401).json({
-      status: 'error',
-      message: 'Invalid credentials'
+      status: "error",
+      message: "Invalid credentials"
     });
   }
 
-  if (!user.isActive || ['suspended', 'closed'].includes(user.accountStatus)) {
+  const isPasswordValid = await user.comparePassword(password);
+
+  if (!isPasswordValid) {
     return res.status(401).json({
-      status: 'error',
-      message: 'Your account is not active'
+      status: "error",
+      message: "Invalid credentials"
     });
   }
 
-  if (!provider) {
-    if (!password) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Password is required'
+  if (user.email && !user.emailVerified) {
+    const challenge = await queueOtpChallenge({ user, purpose: 'verification' });
+
+    if (!challenge.ok) {
+      return res.status(challenge.statusCode).json({
+        status: "error",
+        message: challenge.message
       });
     }
 
-    const isPasswordValid = await user.comparePassword(password);
-    if (!isPasswordValid) {
-      return res.status(401).json({
-        status: 'error',
-        message: 'Invalid credentials'
-      });
-    }
+    return res.status(403).json({
+      status: "error",
+      message: "Please verify your email with the OTP we sent",
+      data: {
+        requiresEmailVerification: true,
+        verificationMethod: "otp",
+        email: user.email,
+        otpExpiresInMinutes: Math.round(OTP_TTL_SECONDS / 60),
+        ...(process.env.NODE_ENV === "production" ? {} : { verificationOtp: challenge.otp })
+      }
+    });
   }
+
+  // --- Fraud Check Logic ---
+  const risk = calculateRiskScore(user);
+  
+  // Ensure the fraud object exists on the user model before assignment
+  if (!user.fraud) user.fraud = {};
+  user.fraud.riskScore = risk;
+
+  if (risk > 80) {
+    return res.status(403).json({
+      status: "error",
+      message: "Account flagged for fraud review"
+    });
+  }
+  // -------------------------
 
   const { accessToken, refreshToken } = generateTokens(user._id, user.role);
 
-  user.refreshToken = refreshToken;
+  user.refreshToken = hashToken(refreshToken);
   user.lastLogin = new Date();
   user.lastLoginIp = req.ip;
-  user.lastLoginUserAgent = req.headers['user-agent'];
+  user.lastLoginUserAgent = req.headers["user-agent"];
+
   await user.save();
 
-  await logAuditEvent({
-    actor: user._id,
-    actorRole: user.role,
-    action: 'auth.login',
-    targetType: 'User',
-    targetId: user._id,
-    summary: 'User login',
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent']
-  });
+  res.cookie("accessToken", accessToken, getAuthCookieOptions(15 * 60 * 1000));
 
-  res.status(200).json({
-    status: 'success',
-    message: 'Login successful',
-    data: {
-      user: {
-        id: user._id,
-        email: user.email,
-        phone: user.phone,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-        avatar: user.avatar,
-        accountStatus: user.accountStatus,
-        emailVerified: user.emailVerified,
-        phoneVerified: user.phoneVerified
-      },
-      accessToken,
-      refreshToken
-    }
+  res.cookie(
+    "refreshToken",
+    refreshToken,
+    getAuthCookieOptions(7 * 24 * 60 * 60 * 1000)
+  );
+
+  res.json({
+    status: "success",
+    data: { user, accessToken, refreshToken }
   });
 });
 
-// @desc    Refresh access token
-// @route   POST /api/auth/refresh
-// @access  Public
+/*
+|--------------------------------------------------------------------------
+| SESSION STATUS
+|--------------------------------------------------------------------------
+*/
+
+export const getSessionStatus = asyncHandler(async (req, res) => {
+  const accessToken = req.cookies?.accessToken;
+  const refreshTokenValue = req.cookies?.refreshToken;
+
+  const clearAndReturnAnonymous = () => {
+    const clearOptions = getClearAuthCookieOptions();
+    res.clearCookie("accessToken", clearOptions);
+    res.clearCookie("refreshToken", clearOptions);
+    return res.status(200).json({
+      status: "success",
+      data: { authenticated: false, user: null, accessToken: null }
+    });
+  };
+
+  if (!accessToken && !refreshTokenValue) {
+    return clearAndReturnAnonymous();
+  }
+
+  if (accessToken) {
+    try {
+      const decoded = verifyAccessToken(accessToken);
+      const user = await User.findById(decoded.sub).select("-password -refreshToken");
+
+      if (user && user.isActive && !["suspended", "closed"].includes(user.accountStatus)) {
+        return res.status(200).json({
+          status: "success",
+          data: { authenticated: true, user, accessToken }
+        });
+      }
+    } catch {
+      // Fall through to refresh token check.
+    }
+  }
+
+  if (refreshTokenValue) {
+    try {
+      const decoded = verifyRefreshToken(refreshTokenValue);
+      const user = await User.findById(decoded.sub).select("-password +refreshToken");
+
+      if (user && user.refreshToken === hashToken(refreshTokenValue)) {
+        const newAccessToken = generateAccessToken(user._id, user.role);
+
+        res.cookie("accessToken", newAccessToken, getAuthCookieOptions(15 * 60 * 1000));
+
+        return res.status(200).json({
+          status: "success",
+          data: {
+            authenticated: true,
+            user,
+            accessToken: newAccessToken
+          }
+        });
+      }
+    } catch {
+      // Treat invalid/expired cookies as anonymous.
+    }
+  }
+
+  return clearAndReturnAnonymous();
+});
+
+/*
+|--------------------------------------------------------------------------
+| REFRESH TOKEN
+|--------------------------------------------------------------------------
+*/
+
 export const refreshToken = asyncHandler(async (req, res) => {
-  const { refreshToken } = req.body;
+  const token = req.cookies.refreshToken;
 
-  if (!refreshToken) {
+  if (!token) {
     return res.status(401).json({
-      status: 'error',
-      message: 'Refresh token required'
+      status: "error",
+      message: "Refresh token required"
     });
   }
 
-  try {
-    // Verify refresh token
-    const decoded = verifyRefreshToken(refreshToken);
+  const decoded = verifyRefreshToken(token);
 
-    // Find user
-    const user = await User.findById(decoded.userId).select('+refreshToken');
+  const user = await User.findById(decoded.sub).select("+refreshToken");
 
-    if (!user || user.refreshToken !== refreshToken) {
-      return res.status(401).json({
-        status: 'error',
-        message: 'Invalid refresh token'
-      });
+  if (!user || user.refreshToken !== hashToken(token)) {
+    return res.status(401).json({
+      status: "error",
+      message: "Invalid refresh token"
+    });
+  }
+
+  const tokens = generateTokens(user._id, user.role);
+
+  user.refreshToken = hashToken(tokens.refreshToken);
+  await user.save();
+
+  res.cookie(
+    "accessToken",
+    tokens.accessToken,
+    getAuthCookieOptions(15 * 60 * 1000)
+  );
+
+  res.cookie(
+    "refreshToken",
+    tokens.refreshToken,
+    getAuthCookieOptions(7 * 24 * 60 * 60 * 1000)
+  );
+
+  res.json({
+    status: "success",
+    data: {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      user
     }
-
-    // Generate new tokens
-    const tokens = generateTokens(user._id, user.role);
-
-    // Update refresh token
-    user.refreshToken = tokens.refreshToken;
-    await user.save();
-
-    res.status(200).json({
-      status: 'success',
-      data: tokens
-    });
-
-  } catch (error) {
-    return res.status(401).json({
-      status: 'error',
-      message: 'Invalid or expired refresh token'
-    });
-  }
+  });
 });
 
-// @desc    Logout user
-// @route   POST /api/auth/logout
-// @access  Private
+/*
+|--------------------------------------------------------------------------
+| LOGOUT
+|--------------------------------------------------------------------------
+*/
+
 export const logout = asyncHandler(async (req, res) => {
-  // Clear refresh token
   req.user.refreshToken = null;
   await req.user.save();
 
-  await logAuditEvent({
-    actor: req.user._id,
-    actorRole: req.user.role,
-    action: 'auth.logout',
-    targetType: 'User',
-    targetId: req.user._id,
-    summary: 'User logout',
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent']
-  });
+  const clearOptions = getClearAuthCookieOptions();
 
-  res.status(200).json({
-    status: 'success',
-    message: 'Logged out successfully'
+  res.clearCookie("accessToken", clearOptions);
+  res.clearCookie("refreshToken", clearOptions);
+
+  res.json({
+    status: "success",
+    message: "Logged out successfully"
   });
 });
 
-// @desc    Get current user
-// @route   GET /api/auth/me
-// @access  Private
+/*
+|--------------------------------------------------------------------------
+| GET CURRENT USER
+|--------------------------------------------------------------------------
+*/
+
 export const getMe = asyncHandler(async (req, res) => {
-  res.status(200).json({
-    status: 'success',
-    data: {
-      user: req.user
-    }
+  res.json({
+    status: "success",
+    data: { user: req.user }
   });
 });
 
-// @desc    Update password
-// @route   PUT /api/auth/update-password
-// @access  Private
+/*
+|--------------------------------------------------------------------------
+| UPDATE PASSWORD
+|--------------------------------------------------------------------------
+*/
+
 export const updatePassword = asyncHandler(async (req, res) => {
   const { currentPassword, newPassword } = req.body;
 
-  // Get user with password
-  const user = await User.findById(req.user._id).select('+password');
+  const user = await User.findById(req.user._id).select("+password");
 
-  // Check current password
   const isPasswordValid = await user.comparePassword(currentPassword);
+
   if (!isPasswordValid) {
     return res.status(401).json({
-      status: 'error',
-      message: 'Current password is incorrect'
+      status: "error",
+      message: "Current password incorrect"
     });
   }
 
-  // Update password
   user.password = newPassword;
   await user.save();
 
-  await logAuditEvent({
-    actor: req.user._id,
-    actorRole: req.user.role,
-    action: 'auth.password_update',
-    targetType: 'User',
-    targetId: req.user._id,
-    summary: 'Password updated',
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent']
-  });
-
-  res.status(200).json({
-    status: 'success',
-    message: 'Password updated successfully'
+  res.json({
+    status: "success",
+    message: "Password updated"
   });
 });
 
-// @desc    Request email verification
-// @route   POST /api/auth/request-email-verification
-// @access  Private
+/*
+|--------------------------------------------------------------------------
+| REQUEST EMAIL VERIFICATION
+|--------------------------------------------------------------------------
+*/
+
 export const requestEmailVerification = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id);
 
-  if (!user.email) {
+  if (!user?.email) {
     return res.status(400).json({
-      status: 'error',
-      message: 'Email is required to verify'
+      status: "error",
+      message: "Add an email address before requesting verification"
+    });
+  }
+
+  if (user.emailVerified) {
+    return res.status(200).json({
+      status: "success",
+      message: "Email is already verified"
     });
   }
 
   const { token, tokenHash } = createVerificationToken();
+
   user.emailVerification = {
     tokenHash,
-    expiresAt: new Date(Date.now() + 1000 * 60 * 30)
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000)
   };
 
   await user.save();
 
-  const verifyUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/verify-email?token=${token}`;
+  const verifyUrl = `${frontendBaseUrl}/verify-email/${token}`;
 
   await sendEmail({
     to: user.email,
-    subject: 'Verify your email',
-    text: `Verify your email: ${verifyUrl}`,
-    html: `<p>Verify your email:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p>`
+    subject: "Verify Email",
+    html: `<a href="${verifyUrl}">${verifyUrl}</a>`
   });
 
-  await logAuditEvent({
-    actor: user._id,
-    actorRole: user.role,
-    action: 'auth.email_verification_requested',
-    targetType: 'User',
-    targetId: user._id,
-    summary: 'Requested email verification',
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent']
-  });
-
-  res.status(200).json({
-    status: 'success',
-    message: 'Verification email sent',
-    data: process.env.NODE_ENV === 'production' ? undefined : { token }
+  res.json({
+    status: "success",
+    message: "Verification email sent",
+    data: process.env.NODE_ENV === "production" ? undefined : { token }
   });
 });
 
-// @desc    Verify email
-// @route   POST /api/auth/verify-email
-// @access  Private
+/*
+|--------------------------------------------------------------------------
+| VERIFY EMAIL
+|--------------------------------------------------------------------------
+*/
+
 export const verifyEmail = asyncHandler(async (req, res) => {
   const { token } = req.body;
 
   if (!token) {
     return res.status(400).json({
-      status: 'error',
-      message: 'Verification token is required'
+      status: "error",
+      message: "Verification token is required"
     });
   }
 
-  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
 
   const user = await User.findOne({
     _id: req.user._id,
-    'emailVerification.tokenHash': tokenHash,
-    'emailVerification.expiresAt': { $gt: new Date() }
+    "emailVerification.tokenHash": tokenHash,
+    "emailVerification.expiresAt": { $gt: new Date() }
   });
 
   if (!user) {
     return res.status(400).json({
-      status: 'error',
-      message: 'Invalid or expired token'
+      status: "error",
+      message: "Invalid or expired token"
     });
   }
 
   user.emailVerified = true;
   user.isVerified = true;
-  user.emailVerification.verifiedAt = new Date();
-  user.accountStatus = user.accountStatus === 'pending_verification' ? 'active' : user.accountStatus;
-  await user.save();
-
-  await sendSms({
-    to: user.phone,
-    body: `Your FreelancePro verification code is ${code}`
-  });
-
-  await logAuditEvent({
-    actor: user._id,
-    actorRole: user.role,
-    action: 'auth.email_verified',
-    targetType: 'User',
-    targetId: user._id,
-    summary: 'Email verified',
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent']
-  });
-
-  res.status(200).json({
-    status: 'success',
-    message: 'Email verified successfully'
-  });
-});
-
-// @desc    Request phone verification
-// @route   POST /api/auth/request-phone-verification
-// @access  Private
-export const requestPhoneVerification = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id);
-
-  if (!user.phone) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'Phone number is required to verify'
-    });
-  }
-
-  const { code, codeHash } = createVerificationCode();
-  user.phoneVerification = {
-    codeHash,
-    expiresAt: new Date(Date.now() + 1000 * 60 * 10)
+  user.accountStatus = "active";
+  user.emailVerification = {
+    tokenHash: null,
+    expiresAt: null,
+    verifiedAt: new Date()
   };
+
   await user.save();
 
-  await logAuditEvent({
-    actor: user._id,
-    actorRole: user.role,
-    action: 'auth.phone_verification_requested',
-    targetType: 'User',
-    targetId: user._id,
-    summary: 'Requested phone verification',
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent']
-  });
-
-  res.status(200).json({
-    status: 'success',
-    message: 'Verification code sent',
-    data: process.env.NODE_ENV === 'production' ? undefined : { code }
+  res.json({
+    status: "success",
+    message: "Email verified successfully"
   });
 });
 
-// @desc    Verify phone
-// @route   POST /api/auth/verify-phone
-// @access  Private
-export const verifyPhone = asyncHandler(async (req, res) => {
-  const { code } = req.body;
+/*
+|--------------------------------------------------------------------------
+| VERIFY EMAIL BY TOKEN (PUBLIC LINK)
+|--------------------------------------------------------------------------
+*/
 
-  if (!code) {
+export const verifyEmailByToken = asyncHandler(async (req, res) => {
+  const { token } = req.params;
+
+  if (!token) {
     return res.status(400).json({
-      status: 'error',
-      message: 'Verification code is required'
+      status: "error",
+      message: "Verification token is required"
     });
   }
 
-  const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
 
   const user = await User.findOne({
-    _id: req.user._id,
-    'phoneVerification.codeHash': codeHash,
-    'phoneVerification.expiresAt': { $gt: new Date() }
+    "emailVerification.tokenHash": tokenHash,
+    "emailVerification.expiresAt": { $gt: new Date() }
   });
 
   if (!user) {
     return res.status(400).json({
-      status: 'error',
-      message: 'Invalid or expired code'
+      status: "error",
+      message: "Invalid or expired token"
+    });
+  }
+
+  user.emailVerified = true;
+  user.isVerified = true;
+  if (user.accountStatus === "pending_verification") {
+    user.accountStatus = "active";
+  }
+  user.emailVerification = {
+    tokenHash: null,
+    expiresAt: null,
+    verifiedAt: new Date()
+  };
+
+  await user.save();
+
+  res.json({
+    status: "success",
+    message: "Email verified successfully"
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| REQUEST PHONE VERIFICATION
+|--------------------------------------------------------------------------
+*/
+
+export const requestPhoneVerification = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id);
+
+  if (!user?.phone) {
+    return res.status(400).json({
+      status: "error",
+      message: "Add a phone number before requesting verification"
+    });
+  }
+
+  if (user.phoneVerified) {
+    return res.status(200).json({
+      status: "success",
+      message: "Phone is already verified"
+    });
+  }
+
+  const { code, codeHash } = createVerificationCode();
+
+  user.phoneVerification = {
+    codeHash,
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000)
+  };
+
+  await user.save();
+
+  await sendSms({
+    to: user.phone,
+    body: `Your verification code is ${code}`
+  });
+
+  res.json({
+    status: "success",
+    message: "Verification code sent"
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| VERIFY PHONE
+|--------------------------------------------------------------------------
+*/
+
+export const verifyPhone = asyncHandler(async (req, res) => {
+  const { code } = req.body;
+
+  const codeHash = crypto.createHash("sha256").update(code).digest("hex");
+
+  const user = await User.findOne({
+    _id: req.user._id,
+    "phoneVerification.codeHash": codeHash,
+    "phoneVerification.expiresAt": { $gt: new Date() }
+  });
+
+  if (!user) {
+    return res.status(400).json({
+      status: "error",
+      message: "Invalid or expired code"
     });
   }
 
   user.phoneVerified = true;
   user.isVerified = true;
-  user.phoneVerification.verifiedAt = new Date();
-  user.accountStatus = user.accountStatus === 'pending_verification' ? 'active' : user.accountStatus;
-  await user.save();
-
-  await logAuditEvent({
-    actor: user._id,
-    actorRole: user.role,
-    action: 'auth.phone_verified',
-    targetType: 'User',
-    targetId: user._id,
-    summary: 'Phone verified',
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent']
-  });
-
-  res.status(200).json({
-    status: 'success',
-    message: 'Phone verified successfully'
-  });
-});
-
-// @desc    Forgot password
-// @route   POST /api/auth/forgot-password
-// @access  Public
-export const forgotPassword = asyncHandler(async (req, res) => {
-  const { email } = req.body;
-
-  if (!email) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'Email is required'
-    });
-  }
-
-  const user = await User.findOne({ email });
-
-  if (!user) {
-    // Don't reveal if user exists or not for security
-    return res.status(200).json({
-      status: 'success',
-      message: 'If an account exists with this email, a password reset link has been sent'
-    });
-  }
-
-  // Generate reset token
-  const resetToken = crypto.randomBytes(32).toString('hex');
-  const resetTokenHash = crypto.createHash('sha256').update(resetToken).digest('hex');
-
-  user.passwordReset = {
-    token: resetTokenHash,
-    expiresAt: new Date(Date.now() + 3600000) // 1 hour
+  user.phoneVerification = {
+    codeHash: null,
+    expiresAt: null,
+    verifiedAt: new Date()
   };
 
   await user.save();
 
-  // In production, send actual email
-  // For now, just log the token (you can implement sendEmail later)
-  const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
-  
-  console.log(`Password reset URL: ${resetUrl}`);
-  
-  // TODO: Uncomment when email service is configured
-  // await sendEmail({
-  //   to: user.email,
-  //   subject: 'Password Reset Request',
-  //   html: `<p>You requested a password reset. Click <a href="${resetUrl}">here</a> to reset your password.</p>`
-  // });
-
-  await logAuditEvent({
-    actor: user._id,
-    actorRole: user.role,
-    action: 'auth.forgot_password',
-    targetType: 'User',
-    targetId: user._id,
-    summary: 'Password reset requested',
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent']
-  });
-
-  res.status(200).json({
-    status: 'success',
-    message: 'If an account exists with this email, a password reset link has been sent'
+  res.json({
+    status: "success",
+    message: "Phone verified successfully"
   });
 });
 
-// @desc    Reset password
-// @route   POST /api/auth/reset-password/:token
-// @access  Public
+/*
+|--------------------------------------------------------------------------
+| FORGOT PASSWORD
+|--------------------------------------------------------------------------
+*/
+
+export const forgotPassword = asyncHandler(async (req, res) => {
+  const { email } = req.body;
+
+  const user = await User.findOne({ email });
+
+  if (!user) {
+    return res.json({
+      status: "success",
+      message:
+        "If an account exists with this email, a password reset link has been sent"
+    });
+  }
+
+  const resetToken = crypto.randomBytes(32).toString("hex");
+
+  const resetTokenHash = crypto
+    .createHash("sha256")
+    .update(resetToken)
+    .digest("hex");
+
+  user.passwordReset = {
+    token: resetTokenHash,
+    expiresAt: new Date(Date.now() + 3600000)
+  };
+
+  await user.save();
+
+  const resetUrl = `${frontendBaseUrl}/reset-password/${resetToken}`;
+
+  await sendEmail({
+    to: user.email,
+    subject: "Reset your password",
+    html: `<a href="${resetUrl}">${resetUrl}</a>`
+  });
+
+  res.json({
+    status: "success",
+    message: "Password reset link sent"
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| RESET PASSWORD
+|--------------------------------------------------------------------------
+*/
+
 export const resetPassword = asyncHandler(async (req, res) => {
   const { token } = req.params;
   const { password } = req.body;
 
-  if (!password) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'Password is required'
-    });
-  }
-
-  const resetTokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const resetTokenHash = crypto
+    .createHash("sha256")
+    .update(token)
+    .digest("hex");
 
   const user = await User.findOne({
-    'passwordReset.token': resetTokenHash,
-    'passwordReset.expiresAt': { $gt: new Date() }
+    "passwordReset.token": resetTokenHash,
+    "passwordReset.expiresAt": { $gt: new Date() }
   });
 
   if (!user) {
     return res.status(400).json({
-      status: 'error',
-      message: 'Invalid or expired reset token'
+      status: "error",
+      message: "Invalid or expired reset token"
     });
   }
 
   user.password = password;
   user.passwordReset = undefined;
+
   await user.save();
 
-  await logAuditEvent({
-    actor: user._id,
-    actorRole: user.role,
-    action: 'auth.password_reset',
-    targetType: 'User',
-    targetId: user._id,
-    summary: 'Password reset completed',
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent']
+  res.json({
+    status: "success",
+    message: "Password reset successfully"
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| REQUEST LOGIN OTP (EMAIL)
+|--------------------------------------------------------------------------
+*/
+
+export const requestLoginOtp = asyncHandler(async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+
+  if (!email) {
+    return res.status(400).json({
+      status: "error",
+      message: "Email is required"
+    });
+  }
+
+  const user = await User.findOne({ email }).select("_id email emailVerified role firstName lastName");
+  const pendingRegistrationKey = getPendingRegistrationKey(email);
+  const pendingRegistration = user ? null : await getOtpData(pendingRegistrationKey);
+
+  if (!user && !pendingRegistration) {
+    return res.status(404).json({
+      status: "error",
+      message: "User not found"
+    });
+  }
+
+  const otpTarget = user || pendingRegistration;
+  const challenge = await queueOtpChallenge({
+    user: otpTarget,
+    purpose: user ? (user.emailVerified ? 'login' : 'verification') : 'registration'
   });
 
+  if (!challenge.ok) {
+    return res.status(challenge.statusCode).json({
+      status: "error",
+      message: challenge.message
+    });
+  }
+
   res.status(200).json({
-    status: 'success',
-    message: 'Password reset successfully'
+    status: "success",
+    message: user
+      ? (user.emailVerified
+      ? "OTP sent to your email"
+      : "Verification OTP sent to your email")
+      : "Verification OTP sent to your email",
+    data: {
+      email,
+      requiresEmailVerification: user ? !user.emailVerified : true,
+      verificationMethod: "otp",
+      otpExpiresInMinutes: Math.round(OTP_TTL_SECONDS / 60),
+      ...(process.env.NODE_ENV === "production" ? {} : { otp: challenge.otp })
+    }
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| VERIFY LOGIN OTP (EMAIL)
+|--------------------------------------------------------------------------
+*/
+
+export const verifyLoginOtp = asyncHandler(async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const otp = String(req.body?.otp || "").trim();
+
+  if (!email || !otp) {
+    return res.status(400).json({
+      status: "error",
+      message: "Email and OTP are required"
+    });
+  }
+
+  let user = await User.findOne({ email }).select("+refreshToken");
+  const pendingRegistrationKey = getPendingRegistrationKey(email);
+  const pendingRegistration = user ? null : await getOtpData(pendingRegistrationKey);
+
+  if (!user && !pendingRegistration) {
+    return res.status(404).json({
+      status: "error",
+      message: "User not found"
+    });
+  }
+
+  const otpPurpose = user ? (user.emailVerified ? 'login' : 'verification') : 'registration';
+  const { otpKey, cooldownKey, lockKey } = getOtpKeys(email, otpPurpose);
+
+  const lockTtl = await getTtlSeconds(lockKey);
+  if (lockTtl > 0) {
+    return res.status(429).json({
+      status: "error",
+      message: `Too many failed attempts. Try again in ${lockTtl}s`
+    });
+  }
+
+  const otpData = await getOtpData(otpKey);
+  if (!otpData?.otpHash) {
+    return res.status(400).json({
+      status: "error",
+      message: "OTP invalid or expired"
+    });
+  }
+
+  const attempts = Number(otpData.attempts || 0);
+  if (attempts >= OTP_MAX_ATTEMPTS) {
+    await deleteOtpData(otpKey);
+    await setOtpData(lockKey, { locked: true }, OTP_LOCK_SECONDS);
+    return res.status(429).json({
+      status: "error",
+      message: "Maximum OTP attempts exceeded. Try again later"
+    });
+  }
+
+  const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+  const isValidOtp = otpHash === otpData.otpHash;
+
+  if (!isValidOtp) {
+    const nextAttempts = attempts + 1;
+    const ttl = await getTtlSeconds(otpKey);
+    if (ttl > 0) {
+      await setOtpData(
+        otpKey,
+        {
+          ...otpData,
+          attempts: nextAttempts
+        },
+        ttl
+      );
+    }
+
+    if (nextAttempts >= OTP_MAX_ATTEMPTS) {
+      await deleteOtpData(otpKey);
+      await setOtpData(lockKey, { locked: true }, OTP_LOCK_SECONDS);
+      return res.status(429).json({
+        status: "error",
+        message: "Maximum OTP attempts exceeded. Try again later"
+      });
+    }
+
+    return res.status(400).json({
+      status: "error",
+      message: `Invalid OTP. ${OTP_MAX_ATTEMPTS - nextAttempts} attempts remaining`
+    });
+  }
+
+  await deleteOtpData(otpKey);
+  await deleteOtpData(cooldownKey);
+  await deleteOtpData(lockKey);
+
+  const isPendingRegistration = !user && !!pendingRegistration;
+  const wasUnverified = user ? !user.emailVerified : true;
+
+  if (isPendingRegistration) {
+    const registrationPassword = pendingRegistration.password;
+
+    user = await User.create({
+      email,
+      phone: pendingRegistration.phone || undefined,
+      password: registrationPassword,
+      firstName: pendingRegistration.firstName,
+      lastName: pendingRegistration.lastName,
+      role: pendingRegistration.role,
+      accountStatus: "active",
+      emailVerified: true,
+      isVerified: true
+    });
+
+    await deleteOtpData(pendingRegistrationKey);
+  }
+
+  if (wasUnverified && !isPendingRegistration) {
+    user.emailVerified = true;
+    user.isVerified = true;
+    user.accountStatus = "active";
+    user.emailVerification = {
+      tokenHash: null,
+      expiresAt: null,
+      verifiedAt: new Date()
+    };
+  }
+
+  const { accessToken, refreshToken } = generateTokens(user._id, user.role);
+  user.refreshToken = hashToken(refreshToken);
+  user.lastLogin = new Date();
+  user.lastLoginIp = req.ip;
+  user.lastLoginUserAgent = req.headers["user-agent"];
+  await user.save();
+
+  res.cookie("accessToken", accessToken, getAuthCookieOptions(15 * 60 * 1000));
+  res.cookie("refreshToken", refreshToken, getAuthCookieOptions(7 * 24 * 60 * 60 * 1000));
+
+  res.status(200).json({
+    status: "success",
+    message: wasUnverified
+      ? "OTP verified. Registration completed successfully"
+      : "OTP verified. Login successful",
+    data: { user, accessToken, refreshToken }
   });
 });

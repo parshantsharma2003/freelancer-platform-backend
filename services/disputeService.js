@@ -117,7 +117,7 @@ const freezeEscrow = async (contractId, disputeId) => {
   // Find payment for this contract
   const payment = await Payment.findOne({
     contract: contractId,
-    status: { $in: ['pending', 'processing'] }
+    status: { $in: ['pending', 'processing', 'held-in-escrow'] }
   });
 
   if (payment) {
@@ -341,13 +341,14 @@ export const getDisputesForUser = async (userId, page = 1, limit = 10) => {
 /**
  * Get a specific dispute (with access control)
  */
-export const getDispute = async (disputeId, userId) => {
+export const getDispute = async (disputeId, userId, userRole) => {
+
   const dispute = await Dispute.findById(disputeId);
 
   if (!dispute) {
     throw new Error('Dispute not found');
   }
-  // Check if user is involved (client, freelancer) or admin
+
   const isInvolved = dispute.isUserInvolved(userId);
   const isAdmin = userRole === 'super_admin';
 

@@ -1,8 +1,33 @@
 import Job from '../models/Job.js';
+import User from "../models/User.js";
 import ClientProfile from '../models/ClientProfile.js';
 import savedSearchService from '../services/savedSearchService.js';
 import notificationService from '../services/notificationService.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { findBestFreelancers } from "../services/jobMatchingService.js";
+import { getRecommendedJobs } from "../services/recommendationService.js";
+
+// @desc    Suggest AI-matched freelancers for a job
+// @route   GET /api/jobs/:jobId/suggestions
+// @access  Private (Clients only)
+export const suggestFreelancers = asyncHandler(async (req, res) => {
+  const job = await Job.findById(req.params.jobId);
+
+  if (!job) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'Job not found'
+    });
+  }
+
+  const freelancers = await User.find({ role: "freelancer" });
+  const matches = findBestFreelancers(job, freelancers);
+
+  res.status(200).json({
+    status: 'success',
+    data: matches
+  });
+});
 
 // @desc    Create a job
 // @route   POST /api/jobs
@@ -59,7 +84,6 @@ export const createJob = asyncHandler(async (req, res) => {
         socketBroadcast.broadcastNewJob(job);
       }
     } catch (socketError) {
-      // Socket broadcasting failed, but REST API will serve as fallback
       console.log('[Socket] Broadcasting failed (REST fallback will handle it):', socketError.message);
     }
 
@@ -71,7 +95,6 @@ export const createJob = asyncHandler(async (req, res) => {
         console.log(`[SavedSearch] Job alert processed: ${alertResult.matchCount} matches, ${alertResult.notificationsSent} notifications sent`);
       }
     } catch (alertError) {
-      // Saved search alert failed, but shouldn't block job creation
       console.log('[SavedSearch] Alert processing failed (non-critical):', alertError.message);
     }
   }
@@ -109,9 +132,7 @@ export const getJobs = asyncHandler(async (req, res) => {
     ]
   });
 
-  // Filter visibility: exclude invite-only jobs unless user is invited
   if (req.user) {
-    // Logged-in user: can see public jobs + invite-only jobs they're invited to
     query.$or = [
       { visibility: 'public' },
       {
@@ -120,7 +141,6 @@ export const getJobs = asyncHandler(async (req, res) => {
       }
     ];
   } else {
-    // Anonymous user: only public jobs
     query.visibility = 'public';
   }
 
@@ -154,7 +174,6 @@ export const getJobs = asyncHandler(async (req, res) => {
 
   const total = await Job.countDocuments(query);
 
-  // Prevent caching
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
@@ -188,9 +207,18 @@ export const getJobById = asyncHandler(async (req, res) => {
     });
   }
 
+  const clientProfile = await ClientProfile.findOne({ user: job.client?._id })
+    .select('companyName description location totalJobs totalSpent rating reviewsCount isVerified');
+
+  const jobData = job.toObject();
+  jobData.clientProfile = clientProfile || null;
+
   res.status(200).json({
     status: 'success',
-    data: { job }
+    data: {
+      job: jobData,
+      clientProfile: clientProfile || null
+    }
   });
 });
 
@@ -207,7 +235,6 @@ export const updateJob = asyncHandler(async (req, res) => {
     });
   }
 
-  // Check ownership
   if (job.client.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
     return res.status(403).json({
       status: 'error',
@@ -245,7 +272,6 @@ export const deleteJob = asyncHandler(async (req, res) => {
     });
   }
 
-  // Check ownership
   if (job.client.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
     return res.status(403).json({
       status: 'error',
@@ -255,7 +281,6 @@ export const deleteJob = asyncHandler(async (req, res) => {
 
   await job.deleteOne();
 
-  // Update client profile
   await ClientProfile.findOneAndUpdate(
     { user: job.client },
     { $inc: { activeJobs: -1 } }
@@ -312,7 +337,6 @@ export const closeJob = asyncHandler(async (req, res) => {
     });
   }
 
-  // Check ownership
   if (job.client.toString() !== req.user._id.toString()) {
     return res.status(403).json({
       status: 'error',
@@ -323,7 +347,6 @@ export const closeJob = asyncHandler(async (req, res) => {
   job.status = 'closed';
   await job.save();
 
-  // Update client profile
   await ClientProfile.findOneAndUpdate(
     { user: job.client },
     { $inc: { activeJobs: -1 } }
@@ -366,7 +389,6 @@ export const changeJobStatus = asyncHandler(async (req, res) => {
     });
   }
 
-  // Check ownership
   if (job.client.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
     return res.status(403).json({
       status: 'error',
@@ -377,7 +399,6 @@ export const changeJobStatus = asyncHandler(async (req, res) => {
   const oldStatus = job.status;
   job.status = status;
 
-  // Handle status transitions
   if (status === 'open' && !job.publishedAt) {
     job.publishedAt = new Date();
   }
@@ -392,7 +413,6 @@ export const changeJobStatus = asyncHandler(async (req, res) => {
 
   await job.save();
 
-  // Update client profile based on status changes
   if ((oldStatus === 'open' || oldStatus === 'in-progress') && (status === 'closed' || status === 'completed' || status === 'cancelled')) {
     await ClientProfile.findOneAndUpdate(
       { user: job.client },
@@ -405,7 +425,6 @@ export const changeJobStatus = asyncHandler(async (req, res) => {
     );
   }
 
-  // Emit socket event for real-time update
   try {
     const io = req.app.get('io');
     if (io) {
@@ -427,3 +446,30 @@ export const changeJobStatus = asyncHandler(async (req, res) => {
     data: { job }
   });
 });
+
+// @desc    Get recommended jobs for freelancer
+// @route   GET /api/jobs/recommended
+// @access  Private (Freelancers only)
+export const getRecommendedJobsForFreelancer = async (req, res) => {
+  try {
+    const freelancer = await User.findById(req.user._id);
+
+    if (!freelancer) {
+      return res.status(404).json({
+        message: "Freelancer not found"
+      });
+    }
+
+    const jobs = await getRecommendedJobs(freelancer);
+
+    res.json({
+      success: true,
+      jobs
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      message: "Failed to get recommended jobs"
+    });
+  }
+};

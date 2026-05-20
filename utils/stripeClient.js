@@ -11,6 +11,11 @@ const buildMockStripe = () => ({
       status: 'requires_payment_method',
       client_secret: 'pi_test_secret',
       latest_charge: 'ch_test_123'
+    }),
+    capture: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: 'succeeded',
+      latest_charge: 'ch_test_123'
     })
   },
   transfers: {

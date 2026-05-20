@@ -587,15 +587,23 @@ export const initializeSocketEvents = (io) => {
           messageId: message._id,
           senderId: message.sender._id,
           senderName: `${message.sender.firstName} ${message.sender.lastName}`,
+          senderAvatar: message.sender.avatar,
           receiverId: message.receiver._id,
           conversationId: message.conversation._id,
           content: message.content,
           messageType: message.messageType,
           contractId: message.contract ? message.contract._id : null,
           proposalId: message.proposal ? message.proposal._id : null,
-          attachmentsCount: message.attachments?.length || 0,
+          attachments: Array.isArray(message.attachments) ? message.attachments.map(att => ({
+            name: att.name,
+            url: att.url,
+            type: att.type,
+            size: att.size,
+            uploadedAt: att.uploadedAt
+          })) : [],
           createdAt: message.createdAt,
-          senderRole: message.senderRole
+          senderRole: message.senderRole,
+          isRead: message.isRead || false
         },
         timestamp: new Date()
       };
@@ -606,7 +614,7 @@ export const initializeSocketEvents = (io) => {
         io.to(`contract:${message.contract._id}`).emit('message:new', payload);
       }
       io.to(`conversation:${message.conversation._id}`).emit('message:new', payload);
-      console.log(`[Message] New message from ${message.sender._id} to ${message.receiver._id} in contract ${message.contract?._id}`);
+      console.log(`[Message] New message from ${message.sender._id} to ${message.receiver._id} in contract ${message.contract?._id} with ${message.attachments?.length || 0} attachments`);
     },
 
     broadcastReadReceipt: (conversation, readerId) => {
@@ -635,6 +643,64 @@ export const initializeSocketEvents = (io) => {
         readerId,
         timestamp: new Date()
       });
+    },
+
+    /**
+     * 📢 Notify users when a message is deleted
+     * Called from: Message controller on deletion
+     */
+    broadcastMessageDeleted: (contractId, conversationId, messageId, deletedBy) => {
+      const payload = {
+        status: 'success',
+        event: 'message:deleted',
+        data: {
+          messageId,
+          contractId,
+          conversationId,
+          deletedBy,
+          deletedAt: new Date()
+        },
+        timestamp: new Date()
+      };
+
+      if (contractId) {
+        io.to(`contract:${contractId}`).emit('message:deleted', payload);
+      }
+      if (conversationId) {
+        io.to(`conversation:${conversationId}`).emit('message:deleted', payload);
+      }
+      console.log(`[MessageDelete] Message ${messageId} deleted in contract ${contractId}`);
+    },
+
+    /**
+     * 📢 Notify users when a message is edited
+     * Called from: Message controller on edit
+     */
+    broadcastMessageEdited: (contractId, conversationId, message) => {
+      const payload = {
+        status: 'success',
+        event: 'message:edited',
+        data: {
+          messageId: message._id,
+          contractId,
+          conversationId,
+          content: message.content,
+          messageType: message.messageType,
+          attachments: message.attachments,
+          editedAt: message.updatedAt || new Date(),
+          editedBy: message.sender._id,
+          senderName: `${message.sender.firstName} ${message.sender.lastName}`
+        },
+        timestamp: new Date()
+      };
+
+      if (contractId) {
+        io.to(`contract:${contractId}`).emit('message:edited', payload);
+      }
+      if (conversationId) {
+        io.to(`conversation:${conversationId}`).emit('message:edited', payload);
+      }
+      console.log(`[MessageEdit] Message ${message._id} edited in contract ${contractId}`);
     }
   };
 };

@@ -100,6 +100,12 @@ const clientProfileSchema = new mongoose.Schema({
       default: true
     }
   },
+  profileCompleteness: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 100
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -109,7 +115,46 @@ const clientProfileSchema = new mongoose.Schema({
     default: Date.now
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+clientProfileSchema.methods.calculateCompleteness = function(options = {}) {
+  const { hasAvatar = false } = options;
+
+  let score = 0;
+  const fields = {
+    avatar: 10,
+    companyName: 20,
+    companySize: 15,
+    industry: 15,
+    description: 20,
+    hiringPreferences: 20
+  };
+
+  if (hasAvatar) score += fields.avatar;
+  if (this.companyName) score += fields.companyName;
+  if (this.companySize) score += fields.companySize;
+  if (this.industry) score += fields.industry;
+  if (this.description && this.description.length >= 40) score += fields.description;
+
+  if (
+    this.preferences &&
+    typeof this.preferences.autoAcceptProposals === 'boolean' &&
+    typeof this.preferences.notifyNewProposals === 'boolean'
+  ) {
+    score += fields.hiringPreferences;
+  }
+
+  this.profileCompleteness = Math.min(score, 100);
+  return this.profileCompleteness;
+};
+
+clientProfileSchema.virtual('completeness').get(function() {
+  return this.profileCompleteness;
+}).set(function(value) {
+  this.profileCompleteness = value;
 });
 
 const ClientProfile = mongoose.model('ClientProfile', clientProfileSchema);

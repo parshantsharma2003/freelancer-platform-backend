@@ -7,7 +7,8 @@ import {
   deleteJob,
   getMyJobs,
   closeJob,
-  changeJobStatus
+  changeJobStatus,
+  getRecommendedJobsForFreelancer
 } from '../controllers/jobController.js';
 import {
   sendJobInvite,
@@ -22,6 +23,14 @@ const router = express.Router();
 
 // Public routes
 router.get('/', paginationValidation, getJobs);
+
+// Protected routes (Freelancers)
+// Note: Placed before /:id to prevent "recommended" being treated as an ID
+router.get(
+  "/recommended",
+  protect,
+  getRecommendedJobsForFreelancer
+);
 
 // Protected routes (Clients only) - MUST come before /:id route
 router.post('/', protect, clientOnly, jobValidation, createJob);

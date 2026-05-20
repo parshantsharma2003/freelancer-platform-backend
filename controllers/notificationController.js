@@ -1,19 +1,24 @@
-import Notification from '../models/Notification.js';
-import notificationService from '../services/notificationService.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import notificationService from "../services/notificationService.js";
+import { asyncHandler } from "../middleware/errorHandler.js";
+import { getNotificationQueue } from "../queues/notificationQueue.js";
 
-// @desc    Get all notifications for current user
-// @route   GET /api/notifications
-// @access  Private
+/* -------------------------------------------------------------------------- */
+/* GET USER NOTIFICATIONS                             */
+/* -------------------------------------------------------------------------- */
+
 export const getNotifications = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 20;
+
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+
   const { isRead, type } = req.query;
 
   const filters = {};
+
   if (isRead !== undefined) {
-    filters.isRead = isRead === 'true';
+    filters.isRead = isRead === "true";
   }
+
   if (type) {
     filters.type = type;
   }
@@ -26,83 +31,130 @@ export const getNotifications = asyncHandler(async (req, res) => {
   );
 
   res.status(200).json({
-    status: 'success',
+    status: "success",
     data: {
       notifications: result.data,
       unreadCount: result.unreadCount,
       pagination: result.pagination
     }
   });
+
 });
 
-// @desc    Mark notification as read (using service)
-// @route   PUT /api/notifications/:id/read
-// @access  Private
+
+/* -------------------------------------------------------------------------- */
+/* MARK NOTIFICATION AS READ                          */
+/* -------------------------------------------------------------------------- */
+
 export const markAsRead = asyncHandler(async (req, res) => {
+
   const notification = await notificationService.markAsRead(
     req.params.id,
     req.user._id
   );
 
   res.status(200).json({
-    status: 'success',
-    message: 'Notification marked as read',
+    status: "success",
+    message: "Notification marked as read",
     data: { notification }
   });
+
 });
 
-// @desc    Mark notification as read (PATCH alias)
-// @route   PATCH /api/notifications/:id/read
-// @access  Private
+
+/* -------------------------------------------------------------------------- */
+/* PATCH ALIAS FOR MARK AS READ                           */
+/* -------------------------------------------------------------------------- */
+
 export const markAsReadPatch = asyncHandler(async (req, res) => {
+
   const notification = await notificationService.markAsRead(
     req.params.id,
     req.user._id
   );
 
   res.status(200).json({
-    status: 'success',
-    message: 'Notification marked as read',
+    status: "success",
+    message: "Notification marked as read",
     data: { notification }
   });
+
 });
 
-// @desc    Mark all notifications as read
-// @route   PUT /api/notifications/mark-all-read
-// @access  Private
+
+/* -------------------------------------------------------------------------- */
+/* MARK ALL NOTIFICATIONS AS READ                       */
+/* -------------------------------------------------------------------------- */
+
 export const markAllAsRead = asyncHandler(async (req, res) => {
+
   const result = await notificationService.markAllAsRead(req.user._id);
 
   res.status(200).json({
-    status: 'success',
+    status: "success",
     message: result.message,
-    data: { modifiedCount: result.modifiedCount }
+    data: {
+      modifiedCount: result.modifiedCount
+    }
   });
+
 });
 
-// @desc    Delete notification
-// @route   DELETE /api/notifications/:id
-// @access  Private
+
+/* -------------------------------------------------------------------------- */
+/* DELETE NOTIFICATION                              */
+/* -------------------------------------------------------------------------- */
+
 export const deleteNotification = asyncHandler(async (req, res) => {
+
   await notificationService.deleteNotification(
     req.params.id,
     req.user._id
   );
 
   res.status(200).json({
-    status: 'success',
-    message: 'Notification deleted'
+    status: "success",
+    message: "Notification deleted successfully"
   });
+
 });
 
-// @desc    Get unread count
-// @route   GET /api/notifications/unread-count
-// @access  Private
+
+/* -------------------------------------------------------------------------- */
+/* GET UNREAD COUNT                                */
+/* -------------------------------------------------------------------------- */
+
 export const getUnreadCount = asyncHandler(async (req, res) => {
+
   const count = await notificationService.getUnreadCount(req.user._id);
 
   res.status(200).json({
-    status: 'success',
+    status: "success",
     data: { count }
+  });
+
+});
+
+/* -------------------------------------------------------------------------- */
+/* SEND NOTIFICATION (ASYNC)                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Example of how to use the background worker for new notifications
+ */
+export const createNotification = asyncHandler(async (req, res) => {
+  const { recipient, message, type } = req.body;
+  const notificationQueue = getNotificationQueue();
+
+  // Notifications will now run in background worker via Bull/Redis
+  await notificationQueue.add("sendNotification", {
+    recipient,
+    message,
+    type
+  });
+
+  res.status(202).json({
+    status: "success",
+    message: "Notification queued for delivery"
   });
 });

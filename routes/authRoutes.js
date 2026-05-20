@@ -8,24 +8,32 @@ import {
   updatePassword,
   requestEmailVerification,
   verifyEmail,
+  verifyEmailByToken,
   requestPhoneVerification,
   verifyPhone,
+  requestLoginOtp,
+  verifyLoginOtp,
+  getSessionStatus,
   forgotPassword,
   resetPassword
 } from '../controllers/authController.js';
 import { startOAuth, handleOAuthCallback } from '../controllers/oauthController.js';
 import { protect } from '../middleware/authMiddleware.js';
-import { registerValidation, loginValidation } from '../middleware/validationMiddleware.js';
+import { secureRegisterValidation, loginValidation } from '../middleware/validationMiddleware.js';
 import { authRateLimiter, loginRateLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
 
 // Public routes
-router.post('/register', authRateLimiter, registerValidation, register);
+router.post('/register', authRateLimiter, secureRegisterValidation, register);
 router.post('/login', loginRateLimiter, loginValidation, login);
 router.post('/refresh', refreshToken);
+router.get('/session', getSessionStatus);
 router.post('/forgot-password', authRateLimiter, forgotPassword);
 router.post('/reset-password/:token', authRateLimiter, resetPassword);
+router.post('/request-login-otp', loginRateLimiter, requestLoginOtp);
+router.post('/verify-login-otp', loginRateLimiter, verifyLoginOtp);
+router.get('/verify-email/:token', verifyEmailByToken);
 router.get('/oauth/:provider', startOAuth);
 router.get('/oauth/:provider/callback', handleOAuthCallback);
 
