@@ -2,7 +2,7 @@ require('dotenv').config();
 
 const config = {
   mongodb: {
-    url: process.env.MONGODB_URI,
+    url: process.env.MONGO_URI,
     databaseName: process.env.MONGODB_DB_NAME || 'freelancer-platform'
   },
   migrationsDir: 'migrations',

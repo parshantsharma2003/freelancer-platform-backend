@@ -9,10 +9,10 @@ import Contract from '../models/Contract.js';
 dotenv.config();
 
 const connect = async () => {
-  if (!process.env.MONGODB_URI) {
-    throw new Error('MONGODB_URI is required');
+  if (!process.env.MONGO_URI) {
+    throw new Error('MONGO_URI is required');
   }
-  await mongoose.connect(process.env.MONGODB_URI);
+  await mongoose.connect(process.env.MONGO_URI);
 };
 
 const createAdmin = async () => {

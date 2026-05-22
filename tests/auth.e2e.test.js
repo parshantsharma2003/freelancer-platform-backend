@@ -8,7 +8,7 @@ let mongo;
 
 beforeAll(async () => {
   mongo = await MongoMemoryServer.create();
-  process.env.MONGODB_URI = mongo.getUri();
+  process.env.MONGO_URI = mongo.getUri();
   process.env.JWT_ACCESS_SECRET = 'test_access';
   process.env.JWT_REFRESH_SECRET = 'test_refresh';
   process.env.NODE_ENV = 'test';

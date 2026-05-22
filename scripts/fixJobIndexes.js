@@ -6,7 +6,7 @@ dotenv.config();
 const fixIndexes = async () => {
   try {
     console.log('Connecting to MongoDB...');
-    await mongoose.connect(process.env.MONGODB_URI);
+    await mongoose.connect(process.env.MONGO_URI);
     console.log('Connected!');
 
     const Job = mongoose.connection.collection('jobs');

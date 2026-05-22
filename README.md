@@ -64,7 +64,7 @@ npm start
 ```env
 NODE_ENV=production
 PORT=5000
-MONGODB_URI=mongodb+srv://<your-production-cluster>/freelancer-platform
+MONGO_URI=mongodb+srv://<your-production-cluster>/freelancer-platform
 JWT_ACCESS_SECRET=your-access-secret-key
 JWT_REFRESH_SECRET=your-refresh-secret-key
 JWT_ACCESS_EXPIRY=15m

@@ -687,7 +687,7 @@ Save this as `time-tracking.postman_collection.json`:
 # Server Core
 PORT=5001
 NODE_ENV=development
-MONGODB_URI=mongodb+srv://<your-production-cluster>/freelancer-platform
+MONGO_URI=mongodb+srv://<your-production-cluster>/freelancer-platform
 
 # JWT
 JWT_SECRET=your-super-secret-key-here
