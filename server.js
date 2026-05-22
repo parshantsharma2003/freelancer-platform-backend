@@ -14,7 +14,7 @@ import connectDB from "./config/database.js";
 import { configurePassport } from "./config/passport.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { rateLimiter } from "./middleware/rateLimiter.js";
- await connectDB();
+import { sanitizeInput } from "./middleware/sanitizeInput.js";
 
 import authRoutes from "./routes/authRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
@@ -42,6 +42,8 @@ import { initializeSocketEvents } from "./socket/socketEvents.js";
 
 dotenv.config();
 
+await connectDB();
+
 const DEFAULT_FRONTEND_URL =
   "https://gentle-stone-05625c900.7.azurestaticapps.net";
 
@@ -61,14 +63,6 @@ const httpServer = createServer(app);
 */
 
 app.set("trust proxy", 1);
-
-/*
-|--------------------------------------------------------------------------
-| DATABASE
-|--------------------------------------------------------------------------
-*/
-
-connectDB();
 
 /*
 |--------------------------------------------------------------------------
