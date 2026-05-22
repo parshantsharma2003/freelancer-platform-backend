@@ -116,6 +116,7 @@ const configuredOrigins = [
 ];
 
 const allowedOrigins = [
+  "http://localhost:5173",
   DEFAULT_FRONTEND_URL,
   ...configuredOrigins
 ]
