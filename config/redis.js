@@ -3,6 +3,8 @@ import { Redis } from "ioredis";
 const redisUrl = process.env.REDIS_URL;
 
 const isTestEnv = process.env.NODE_ENV === "test";
+const isRedisConfigured = Boolean(redisUrl);
+export const isRedisAvailable = isTestEnv || isRedisConfigured;
 
 const memoryStore = new Map();
 
@@ -55,7 +57,8 @@ const redis = isTestEnv
 	? createTestRedis()
 	: (() => {
 		if (!redisUrl) {
-			throw new Error("REDIS_URL is required");
+			console.warn("REDIS_URL is not set. Using in-memory fallback.");
+			return createTestRedis();
 		}
 
 		return new Redis(redisUrl, {

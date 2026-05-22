@@ -14,7 +14,7 @@ import connectDB from "./config/database.js";
 import { configurePassport } from "./config/passport.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { rateLimiter } from "./middleware/rateLimiter.js";
-import { sanitizeInput } from "./middleware/sanitizeInput.js";
+ await connectDB();
 
 import authRoutes from "./routes/authRoutes.js";
 import userRoutes from "./routes/userRoutes.js";

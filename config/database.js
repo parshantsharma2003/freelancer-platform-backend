@@ -1,8 +1,18 @@
 import mongoose from 'mongoose';
 
 const connectDB = async () => {
+  const mongoUri = process.env.MONGODB_URI;
+
+  if (!mongoUri) {
+    throw new Error('MONGODB_URI is required');
+  }
+
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI);
+    const conn = await mongoose.connect(mongoUri, {
+      dbName: process.env.MONGODB_DB_NAME,
+      serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000
+    });
 
     console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
 

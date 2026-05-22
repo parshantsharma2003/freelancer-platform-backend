@@ -1,12 +1,14 @@
 import { Worker } from "bullmq";
-import redis from "../config/redis.js";
+import redis, { isRedisAvailable } from "../config/redis.js";
 
-new Worker(
-  "notifications",
-  async job => {
-
-    console.log("Processing notification:", job.data);
-
-  },
-  { connection: redis }
-);
+if (isRedisAvailable) {
+  new Worker(
+    "notifications",
+    async (job) => {
+      console.log("Processing notification:", job.data);
+    },
+    { connection: redis }
+  );
+} else {
+  console.warn("Notification worker disabled because Redis is unavailable.");
+}
