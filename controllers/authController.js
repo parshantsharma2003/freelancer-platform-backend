@@ -19,7 +19,7 @@ import { deleteOtpData, getOtpData, getTtlSeconds, setOtpData } from "../utils/o
 const frontendBaseUrl = (
   process.env.FRONTEND_URL ||
   process.env.OAUTH_SUCCESS_REDIRECT ||
-  "http://localhost:5173"
+  "https://gentle-stone-05625c900.7.azurestaticapps.net"
 ).replace(/\/+$/, "");
 
 const createVerificationToken = () => {

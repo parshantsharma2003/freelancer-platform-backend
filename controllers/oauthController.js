@@ -15,8 +15,10 @@ const oauthScopes = {
   linkedin: ["r_liteprofile", "r_emailaddress"]
 };
 
-const frontendBaseUrl = (process.env.FRONTEND_URL || "http://localhost:5173")
-  .replace(/\/+$/, "");
+const frontendBaseUrl = (
+  process.env.FRONTEND_URL ||
+  "https://gentle-stone-05625c900.7.azurestaticapps.net"
+).replace(/\/+$/, "");
 
 /*
 |--------------------------------------------------------------------------

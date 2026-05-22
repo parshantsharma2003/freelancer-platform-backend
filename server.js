@@ -42,6 +42,9 @@ import { initializeSocketEvents } from "./socket/socketEvents.js";
 
 dotenv.config();
 
+const DEFAULT_FRONTEND_URL =
+  "https://gentle-stone-05625c900.7.azurestaticapps.net";
+
 /*
 |--------------------------------------------------------------------------
 | APP + HTTP SERVER
@@ -119,12 +122,7 @@ const configuredOrigins = [
 ];
 
 const allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:4173",
-  "http://localhost:3000",
-  "http://127.0.0.1:5173",
-  "http://127.0.0.1:4173",
-  "http://127.0.0.1:3000",
+  DEFAULT_FRONTEND_URL,
   ...configuredOrigins
 ]
   .map(normalizeOrigin)
@@ -134,14 +132,6 @@ const allowedOrigins = [
 const isAllowedOrigin = (origin) => {
   if (!origin) return true;
   if (allowedOrigins.includes(origin)) return true;
-
-  // In development allow any localhost/127.0.0.1 port for frontend dev servers.
-  if (
-    process.env.NODE_ENV !== "production" &&
-    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)
-  ) {
-    return true;
-  }
 
   return false;
 };

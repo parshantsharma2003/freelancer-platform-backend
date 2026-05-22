@@ -200,10 +200,10 @@ const findOrCreateOAuthUser = async (req, provider, profile) => {
 */
 
 export const configurePassport = () => {
-  const baseUrl = (process.env.BACKEND_URL || "http://localhost:5001").replace(
-    /\/+$/,
-    ""
-  );
+  const baseUrl = (
+    process.env.BACKEND_URL ||
+    "https://freelancerpro-e7cbdnb6bkayc2f8.eastasia-01.azurewebsites.net"
+  ).replace(/\/+$/, "");
 
   const getCallbackUrl = (provider) => {
     const envKey = `OAUTH_${provider.toUpperCase()}_CALLBACK_URL`;

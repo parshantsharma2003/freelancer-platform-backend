@@ -62,14 +62,14 @@ npm start
 ## 🔑 Environment Variables
 
 ```env
-NODE_ENV=development
+NODE_ENV=production
 PORT=5000
-MONGODB_URI=mongodb://localhost:27017/freelancer-platform
+MONGODB_URI=mongodb+srv://<your-production-cluster>/freelancer-platform
 JWT_ACCESS_SECRET=your-access-secret-key
 JWT_REFRESH_SECRET=your-refresh-secret-key
 JWT_ACCESS_EXPIRY=15m
 JWT_REFRESH_EXPIRY=7d
-FRONTEND_URL=http://localhost:5173
+FRONTEND_URL=https://gentle-stone-05625c900.7.azurestaticapps.net
 STRIPE_SECRET_KEY=your-stripe-key
 ```
 
@@ -77,7 +77,7 @@ STRIPE_SECRET_KEY=your-stripe-key
 
 ### Base URL
 ```
-http://localhost:5000/api
+https://freelancerpro-e7cbdnb6bkayc2f8.eastasia-01.azurewebsites.net/api
 ```
 
 ### Response Format
