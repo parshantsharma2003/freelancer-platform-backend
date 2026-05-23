@@ -24,6 +24,16 @@ import { authRateLimiter, loginRateLimiter } from '../middleware/rateLimiter.js'
 
 const router = express.Router();
 
+const startGoogleOAuth = (req, res, next) => {
+  req.params.provider = 'google';
+  return startOAuth(req, res, next);
+};
+
+const handleGoogleOAuthCallback = (req, res, next) => {
+  req.params.provider = 'google';
+  return handleOAuthCallback(req, res, next);
+};
+
 // Public routes
 router.post('/register', authRateLimiter, secureRegisterValidation, register);
 router.post('/login', loginRateLimiter, loginValidation, login);
@@ -34,6 +44,8 @@ router.post('/reset-password/:token', authRateLimiter, resetPassword);
 router.post('/request-login-otp', loginRateLimiter, requestLoginOtp);
 router.post('/verify-login-otp', loginRateLimiter, verifyLoginOtp);
 router.get('/verify-email/:token', verifyEmailByToken);
+router.get('/google', startGoogleOAuth);
+router.get('/google/callback', handleGoogleOAuthCallback);
 router.get('/oauth/:provider', startOAuth);
 router.get('/oauth/:provider/callback', handleOAuthCallback);
 

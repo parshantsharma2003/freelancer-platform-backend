@@ -209,7 +209,7 @@ export const configurePassport = () => {
     const envKey = `OAUTH_${provider.toUpperCase()}_CALLBACK_URL`;
     return (
       process.env[envKey] ||
-      `${baseUrl}/api/auth/oauth/${provider}/callback`
+      `${baseUrl}/api/auth/${provider}/callback`
     );
   };
 

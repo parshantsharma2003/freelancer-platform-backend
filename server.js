@@ -277,6 +277,14 @@ app.use("/api/saved-searches", savedSearchRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/uploads", uploadRoutes);
 
+app.get("/test", (req, res) => {
+  res.status(200).json({
+    status: "success",
+    message: "Deployment test route is working",
+    timestamp: new Date().toISOString()
+  });
+});
+
 /*
 |--------------------------------------------------------------------------
 | 404 HANDLER
