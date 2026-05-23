@@ -775,7 +775,7 @@ export const releaseMilestonePayment = asyncHandler(async (req, res) => {
       if (socketBroadcast) {
         socketBroadcast.notifyUser(contract.freelancer, {
           title: 'Payment Released',
-          message: `You received $${paymentResult.released.netAmount} for milestone: "${milestone.title}"`,
+          message: `You received ₹${paymentResult.released.netAmount} for milestone: "${milestone.title}"`,
           contractId: contract._id,
           milestoneId: milestone._id,
           amount: paymentResult.released.netAmount

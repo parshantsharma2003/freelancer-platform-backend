@@ -73,7 +73,7 @@ describe('Payments E2E', () => {
         description: 'Test job description',
         category: 'Design',
         skills: ['Figma'],
-        budget: { type: 'fixed', amount: 500 },
+        budget: { type: 'fixed', amount: 40000 },
         duration: '1-2-weeks',
         experienceLevel: 'intermediate'
       });
@@ -94,7 +94,7 @@ describe('Payments E2E', () => {
         job: jobId,
         freelancer: freelancerId,
         title: 'Test contract',
-        budget: { amount: 500, type: 'fixed', currency: 'USD' }
+        budget: { amount: 40000, type: 'fixed', currency: 'INR' }
       });
 
     const contractId = contractRes.body.data.contract._id;
@@ -113,7 +113,7 @@ describe('Payments E2E', () => {
           {
             title: 'Milestone 1',
             description: 'First delivery phase',
-            amount: 500,
+            amount: 40000,
             dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
           }
         ]

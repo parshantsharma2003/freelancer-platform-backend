@@ -256,7 +256,7 @@ export const approveTimeLog = asyncHandler(async (req, res) => {
       if (socketBroadcast) {
         socketBroadcast.notifyUser(approvedEntry.freelancer, {
           title: 'Time Entry Approved',
-          message: `Your time entry has been approved for $${approvedEntry.billableAmount}`,
+          message: `Your time entry has been approved for ₹${approvedEntry.billableAmount}`,
           contractId: approvedEntry.contract,
           timeEntryId: approvedEntry._id,
           amount: approvedEntry.billableAmount
@@ -635,7 +635,7 @@ export const payWeekly = asyncHandler(async (req, res) => {
       if (socketBroadcast) {
         socketBroadcast.notifyUser(contract.freelancer, {
           title: 'Weekly Payment Processed',
-          message: `You received $${payment.amount} for ${payment.hours} hours worked`,
+          message: `You received ₹${payment.amount} for ${payment.hours} hours worked`,
           contractId: contractId,
           amount: payment.amount,
           hours: payment.hours

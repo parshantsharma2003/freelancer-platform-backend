@@ -500,7 +500,7 @@ export const initializeSocketEvents = (io) => {
           contractId: approvalData.contractId,
           approved: true,
           billableAmount: approvalData.billableAmount,
-          message: `Your time entry has been approved for $${approvalData.billableAmount}`
+          message: `Your time entry has been approved for ₹${approvalData.billableAmount}`
         },
         timestamp: new Date()
       });
@@ -521,11 +521,11 @@ export const initializeSocketEvents = (io) => {
           weekEnd: paymentData.weekEnd,
           hours: paymentData.hours,
           amount: paymentData.amount,
-          message: `Weekly payment processed: $${paymentData.amount} for ${paymentData.hours} hours`
+          message: `Weekly payment processed: ₹${paymentData.amount} for ${paymentData.hours} hours`
         },
         timestamp: new Date()
       });
-      console.log(`[TimeEntry] Weekly payment processed for user ${freelancerId} - $${paymentData.amount}`);
+      console.log(`[TimeEntry] Weekly payment processed for user ${freelancerId} - ₹${paymentData.amount}`);
     },
 
     /**

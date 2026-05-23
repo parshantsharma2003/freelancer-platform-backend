@@ -314,7 +314,7 @@ export const releasePayment = asyncHandler(async (req, res) => {
       recipient: payment.freelancer,
       type: 'payment_received',
       title: 'Payment Received',
-      message: `You received $${payment.netAmount} for "${payment.contract.title}"`,
+      message: `You received ₹${payment.netAmount} for "${payment.contract.title}"`,
       relatedContract: payment.contract._id,
       relatedUser: req.user._id,
       actionUrl: `/payments/${payment._id}`,

@@ -721,7 +721,7 @@ export const createAdminJob = asyncHandler(async (req, res) => {
     budget: {
       type: 'fixed',
       amount: Number.isFinite(parsedBudget) ? parsedBudget : 0,
-      currency: 'USD'
+      currency: 'INR'
     },
     duration,
     experienceLevel,

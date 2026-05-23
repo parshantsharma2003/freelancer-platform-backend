@@ -18,7 +18,8 @@
     "migrate:down": "migrate-mongo down -f migrate-mongo-config.cjs",
     "migrate:status": "migrate-mongo status -f migrate-mongo-config.cjs",
     "seed": "node scripts/seed.js",
-    "seed:sample": "node scripts/seed.js --sample"
+    "seed:sample": "node scripts/seed.js --sample",
+    "seed:admin": "node scripts/seedAdmin.js"
   },
   "keywords": [
     "freelancer",

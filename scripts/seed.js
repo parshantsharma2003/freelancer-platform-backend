@@ -80,7 +80,7 @@ const createSampleData = async () => {
       user: freelancer._id,
       title: 'Product Designer',
       description: 'Designing high-converting UX for startups.',
-      hourlyRate: 45,
+      hourlyRate: 3600,
       skills: ['Figma', 'UX Research', 'Design Systems'],
       profileCompleteness: 80
     },
@@ -97,8 +97,8 @@ const createSampleData = async () => {
       skills: ['Figma', 'Web Design'],
       budget: {
         type: 'fixed',
-        amount: 800,
-        currency: 'USD'
+        amount: 64000,
+        currency: 'INR'
       },
       duration: '1-2-weeks',
       experienceLevel: 'intermediate',
@@ -114,9 +114,9 @@ const createSampleData = async () => {
       freelancer: freelancer._id,
       title: 'Landing page redesign',
       budget: {
-        amount: 800,
+        amount: 64000,
         type: 'fixed',
-        currency: 'USD'
+        currency: 'INR'
       }
     });
   }
