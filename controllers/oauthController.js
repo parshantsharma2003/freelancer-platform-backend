@@ -20,6 +20,29 @@ const frontendBaseUrl = (
   "https://gentle-stone-05625c900.7.azurestaticapps.net"
 ).replace(/\/+$/, "");
 
+const getOAuthSuccessRedirect = () => {
+  const fallbackUrl = `${frontendBaseUrl}/oauth/callback`;
+  const configuredUrl = (process.env.OAUTH_SUCCESS_REDIRECT || "").trim();
+
+  if (!configuredUrl) {
+    return fallbackUrl;
+  }
+
+  try {
+    const parsed = new URL(configuredUrl);
+    const isLocalHost =
+      parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+
+    if (process.env.NODE_ENV === "production" && isLocalHost) {
+      return fallbackUrl;
+    }
+
+    return configuredUrl;
+  } catch {
+    return fallbackUrl;
+  }
+};
+
 /*
 |--------------------------------------------------------------------------
 | Start OAuth Flow
@@ -139,8 +162,7 @@ export const handleOAuthCallback = (req, res, next) => {
     |--------------------------------------------------------------------------
     */
 
-    const redirectUrl =
-      process.env.OAUTH_SUCCESS_REDIRECT || `${frontendBaseUrl}/dashboard`;
+    const redirectUrl = getOAuthSuccessRedirect();
 
     return res.redirect(redirectUrl);
   })(req, res, next);
