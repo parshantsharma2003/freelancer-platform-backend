@@ -2,6 +2,7 @@ import crypto from "crypto";
 import User from "../models/User.js";
 import {
   generateTokens,
+  generateAccessToken,
   verifyAccessToken,
   verifyRefreshToken,
   hashToken
