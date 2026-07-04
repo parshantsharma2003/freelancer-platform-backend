@@ -806,6 +806,18 @@ export const updateAdminJob = asyncHandler(async (req, res) => {
     }
   });
 
+  if (updateData.budget !== undefined && !updateData.budget?.type) {
+    const parsedBudget = Number(updateData.budget);
+
+    updateData.budget = {
+      type: job.budget?.type || 'fixed',
+      amount: Number.isFinite(parsedBudget) ? parsedBudget : job.budget?.amount || 0,
+      minAmount: job.budget?.minAmount,
+      maxAmount: job.budget?.maxAmount,
+      currency: job.budget?.currency || 'USD'
+    };
+  }
+
   job = await Job.findByIdAndUpdate(req.params.id, updateData, {
     new: true,
     runValidators: true
